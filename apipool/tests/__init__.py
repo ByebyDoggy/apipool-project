@@ -22,6 +22,75 @@ class GoogleMapApiClient(object):
         raise ReachLimitError
 
 
+class NestedApiClient(object):
+    """Mock client with multi-level attribute chain for testing ChainProxy."""
+
+    def __init__(self, apikey):
+        self.apikey = apikey
+        self.nested = _NestedResource()
+        self.api = _ApiResource()
+
+
+class _NestedResource(object):
+    def get_data(self, id=None):
+        return {"id": id, "result": "nested_ok"}
+
+
+class _ApiResource(object):
+    def __init__(self):
+        self.v1 = _V1Resource()
+
+
+class _V1Resource(object):
+    def users_list(self, limit=None):
+        return [{"user_id": i} for i in range(limit or 5)]
+
+
+class CoinGeckoStyleClient(object):
+    """Mock client mimicking 4-level CoinGecko-style SDK chain."""
+
+    def __init__(self, apikey):
+        self.apikey = apikey
+        self.coins = _CoinsResource()
+        self.a = _DeepChainNode("a")
+
+
+class _CoinsResource(object):
+    def __init__(self):
+        self.simple = _SimpleResource()
+
+
+class _SimpleResource(object):
+    def __init__(self):
+        self.price = _PriceResource()
+
+
+class _PriceResource(object):
+    def get(self, ids=None, vs_currencies=None):
+        return {ids: {vs_currencies: 50000.0}}
+
+
+class _DeepChainNode(object):
+    """Generic deep chain node for testing arbitrary depth."""
+
+    def __init__(self, name=""):
+        self._name = name
+
+    def __getattr__(self, item):
+        if item.startswith("_"):
+            raise AttributeError(item)
+        return _DeepChainNode(item)
+
+    def call(self):
+        return "deep_call_ok"
+
+    def raise_error(self):
+        raise ValueError
+
+    def raise_reach_limit_error(self):
+        raise ReachLimitError
+
+
 class GoogleMapApiKey(ApiKey):
     def __init__(self, apikey):
         self.apikey = apikey
@@ -41,6 +110,34 @@ class GoogleMapApiKey(ApiKey):
             return True
         else:
             return False
+
+
+class NestedApiKey(ApiKey):
+    def __init__(self, apikey):
+        self.apikey = apikey
+
+    def get_primary_key(self):
+        return self.apikey
+
+    def create_client(self):
+        return NestedApiClient(self.apikey)
+
+    def test_usability(self, client):
+        return True
+
+
+class CoinGeckoStyleApiKey(ApiKey):
+    def __init__(self, apikey):
+        self.apikey = apikey
+
+    def get_primary_key(self):
+        return self.apikey
+
+    def create_client(self):
+        return CoinGeckoStyleClient(self.apikey)
+
+    def test_usability(self, client):
+        return True
 
 
 apikeys = [

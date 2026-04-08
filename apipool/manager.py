@@ -46,19 +46,84 @@ class ApiCaller(object):
             raise e
 
 
+class ChainProxy(object):
+    """Intermediate proxy for multi-level attribute chain navigation.
+
+    Traverses the attribute chain until ``__call__`` is reached,
+    at which point it resolves the real method and delegates to ``ApiCaller``.
+
+    Key characteristics:
+    - **Lazy key selection**: ``random_one()`` only happens at ``__call__``
+    - **No caching**: each ``.a.b.c`` builds a new lightweight proxy
+    - **Fully transparent**: caller code is completely unaware of the proxy
+    """
+
+    def __init__(self, manager, attr_path, reach_limit_exc):
+        self._manager = manager
+        self._attr_path = list(attr_path)
+        self._reach_limit_exc = reach_limit_exc
+
+    def __getattr__(self, item):
+        """Continue navigating down the attribute chain."""
+        return ChainProxy(
+            manager=self._manager,
+            attr_path=self._attr_path + [item],
+            reach_limit_exc=self._reach_limit_exc,
+        )
+
+    def __call__(self, *args, **kwargs):
+        """End of chain — resolve and execute the actual call."""
+        apikey = self._manager.random_one()
+        real_client = apikey._client
+
+        target = real_client
+        for i, attr in enumerate(self._attr_path):
+            try:
+                target = getattr(target, attr)
+            except AttributeError:
+                path_shown = ".".join(self._attr_path[: i + 1])
+                raise AttributeError(
+                    "ChainProxy: attribute '{}' not found at step {} "
+                    "of path '{}' on client {!r}".format(
+                        attr, i + 1, ".".join(self._attr_path), type(real_client).__name__
+                    )
+                ) from None
+
+        if not callable(target):
+            path_shown = ".".join(self._attr_path)
+            raise TypeError(
+                "ChainProxy: attribute path '{}' resolved to non-callable "
+                "{} of type {}".format(path_shown, repr(target), type(target).__name__)
+            )
+
+        return ApiCaller(
+            apikey=apikey,
+            apikey_manager=self._manager,
+            call_method=target,
+            reach_limit_exc=self._reach_limit_exc,
+        )(*args, **kwargs)
+
+    def __repr__(self):
+        return "ChainProxy(path={})".format(".".join(self._attr_path))
+
+
 class DummyClient(object):
     def __init__(self):
         self._apikey_manager = None
 
     def __getattr__(self, item):
-        apikey = self._apikey_manager.random_one()
-        call_method = getattr(apikey._client, item)
-        return ApiCaller(
-            apikey=apikey,
-            apikey_manager=self._apikey_manager,
-            call_method=call_method,
-            reach_limit_exc=self._apikey_manager.reach_limit_exc,
+        manager = self._apikey_manager
+
+        return ChainProxy(
+            manager=manager,
+            attr_path=[item],
+            reach_limit_exc=manager.reach_limit_exc,
         )
+
+
+class PoolExhaustedError(Exception):
+    """Raised when all API keys in the pool have been exhausted."""
+    pass
 
 
 class NeverRaisesError(Exception):
@@ -126,6 +191,11 @@ class ApiKeyManager(object):
         return apikey
 
     def random_one(self):
+        if len(self.apikey_chain) == 0:
+            raise PoolExhaustedError(
+                "All API keys have been exhausted. "
+                "{} key(s) in archive.".format(len(self.archived_apikey_chain))
+            )
         return random.choice(list(self.apikey_chain.values()))
 
     def check_usable(self):
