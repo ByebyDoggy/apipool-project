@@ -9,17 +9,14 @@ API Call所使用的api key, 返回的状态 以及 完成API Call的时间.
 from datetime import datetime, timedelta
 from collections import OrderedDict
 
-from sqlalchemy import Column, ForeignKey
-from sqlalchemy import String, Integer, DateTime
-from sqlalchemy import func
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy_mate import ExtendedBase
+from sqlalchemy import Column, ForeignKey, create_engine
+from sqlalchemy import String, Integer, DateTime, func
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
 
 
-class ApiKey(Base, ExtendedBase):
+class ApiKey(Base):
     __tablename__ = "apikey"
 
     id = Column(Integer, primary_key=True)
@@ -31,7 +28,7 @@ class ApiKey(Base, ExtendedBase):
         return "ApiKey(id=%r, key=%r)" % (self.id, self.key)
 
 
-class Status(Base, ExtendedBase):
+class Status(Base):
     __tablename__ = "status"
 
     id = Column(Integer, primary_key=True)
@@ -43,7 +40,7 @@ class Status(Base, ExtendedBase):
         return "Status(id=%r, description=%r)" % (self.id, self.description)
 
 
-class Event(Base, ExtendedBase):
+class Event(Base):
     __tablename__ = "event"
 
     apikey_id = Column(Integer, ForeignKey("apikey.id"), primary_key=True)
@@ -129,14 +126,31 @@ class StatsCollector(object):
         self.close()
 
     def _add_all_status(self):
-        Status.smart_insert(
-            self.engine,
-            StatusCollection.get_status_list(),
-        )
+        ses = self.create_session()
+        for status in StatusCollection.get_status_list():
+            existing = (
+                ses.query(Status)
+                .filter(Status.id == status.id)
+                .first()
+            )
+            if existing is None:
+                ses.add(status)
+        ses.commit()
+        ses.close()
 
     def add_all_apikey(self, apikey_list):
         data = [ApiKey(key=apikey.primary_key) for apikey in apikey_list]
-        ApiKey.smart_insert(self.engine, data)
+        ses = self.create_session()
+        for item in data:
+            existing = (
+                ses.query(ApiKey)
+                .filter(ApiKey.key == item.key)
+                .first()
+            )
+            if existing is None:
+                ses.add(item)
+        ses.commit()
+        ses.close()
         self._update_cache()
 
     def _update_cache(self):
@@ -152,7 +166,10 @@ class StatsCollector(object):
             finished_at=datetime.now(),
             status_id=status_id,
         )
-        Event.smart_insert(self.engine, event)
+        ses = self.create_session()
+        ses.add(event)
+        ses.commit()
+        ses.close()
 
     def query_event_in_recent_n_seconds(self,
                                         n_seconds,

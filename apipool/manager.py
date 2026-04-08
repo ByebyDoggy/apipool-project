@@ -8,7 +8,7 @@ built-in stats collector service for api usage and status.
 import sys
 import random
 from collections import OrderedDict
-from sqlalchemy_mate import engine_creator
+from sqlalchemy import create_engine
 
 from .apikey import ApiKey
 from .stats import StatusCollection, StatsCollector
@@ -75,7 +75,7 @@ class ApiKeyManager(object):
 
         # stats collector
         if db_engine is None:
-            db_engine = engine_creator.create_sqlite()
+            db_engine = create_sqlite()
 
         self.stats = StatsCollector(engine=db_engine)
         self.stats.add_all_apikey(apikey_list)
@@ -146,3 +146,7 @@ class ApiKeyManager(object):
             sys.stdout.write("\nThese keys are not usable:")
             for key in self.archived_apikey_chain:
                 sys.stdout.write("\n    %s: %r" % (key, apikey))
+
+
+def create_sqlite():
+    return create_engine("sqlite:///:memory:")

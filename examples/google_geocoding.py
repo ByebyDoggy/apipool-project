@@ -12,13 +12,13 @@ class GoogleGeocoderApiKey(ApiKey):
     def __init__(self, apikey):
         self.apikey = apikey
 
-    def user_01_get_primary_key(self):
+    def get_primary_key(self):
         return self.apikey
 
-    def user_02_create_client(self):
+    def create_client(self):
         return GoogleV3(self.apikey)
 
-    def user_03_test_usable(self, client):
+    def test_usability(self, client):
         address = "1600 Pennsylvania Ave NW, Washington, DC 20500"
         expect_formatted_address = "1600 Pennsylvania Ave NW, Washington, DC 20500, USA"
 

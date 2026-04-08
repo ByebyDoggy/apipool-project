@@ -5,12 +5,12 @@ import pytest
 import random
 from apipool.stats import StatsCollector, StatusCollection
 from apipool.tests import GoogleMapApiKey, apikeys
-from sqlalchemy_mate import engine_creator
+from sqlalchemy import create_engine
 
 
 @pytest.fixture()
 def collector():
-    engine = engine_creator.create_sqlite()
+    engine = create_engine("sqlite:///:memory:")
     collector = StatsCollector(engine=engine)
     collector.add_all_apikey(
         [GoogleMapApiKey(apikey=apikey) for apikey in apikeys]
@@ -46,7 +46,7 @@ class TestDashboardQuery(object):
 
 class TestDashboardConstructor(object):
     def test(self):
-        engine = engine_creator.create_sqlite()
+        engine = create_engine("sqlite:///:memory:")
         collector = StatsCollector(engine=engine)
         assert len(collector._cache_apikey) == 0
         collector.add_all_apikey(

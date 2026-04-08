@@ -8,15 +8,15 @@ class ApiKey(object):
 
     User has to implement these three methods to make it works.
 
-    - :meth:`ApiKey.user_01_get_primary_key`.
-    - :meth:`ApiKey.user_02_create_client`.
-    - :meth:`ApiKey.user_03_test_usable`.
+    - :meth:`ApiKey.get_primary_key`.
+    - :meth:`ApiKey.create_client`.
+    - :meth:`ApiKey.test_usability`.
     """
 
     _client = None
     _apikey_manager = None
 
-    def user_01_get_primary_key(self):
+    def get_primary_key(self):
         """
         Get the unique identifier of this api key. Usually it is a string or
         integer. For example, the AWS Access Key is the primary key of an
@@ -27,7 +27,7 @@ class ApiKey(object):
 
         raise NotImplementedError
 
-    def user_02_create_client(self):
+    def create_client(self):
         """
         Create a client object to perform api call.
 
@@ -43,7 +43,7 @@ class ApiKey(object):
             ...     def __init__(self, apikey):
             ...         self.apikey = apikey
             ...
-            ...     def user_02_create_client(self):
+            ...     def create_client(self):
             ...         return GoogleV3(api_key=self.apikey)
 
         api for ``geopy.geocoder.GoogleV3``: https://geopy.readthedocs.io/en/stable/#googlev3
@@ -52,7 +52,7 @@ class ApiKey(object):
         """
         raise NotImplementedError
 
-    def user_03_test_usable(self, client):
+    def test_usability(self, client):
         """
         Test if this api key is usable for making api call.
 
@@ -65,19 +65,19 @@ class ApiKey(object):
 
     @property
     def primary_key(self):
-        return self.user_01_get_primary_key()
+        return self.get_primary_key()
 
     def connect_client(self):
         """
         connect
         :return:
         """
-        self._client = self.user_02_create_client()
+        self._client = self.create_client()
 
     def is_usable(self):
         if self._client is None:
             self.connect_client()
         try:
-            return self.user_03_test_usable(self._client)
+            return self.test_usability(self._client)
         except:  # pragma: no cover
             return False

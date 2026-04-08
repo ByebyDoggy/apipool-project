@@ -26,13 +26,13 @@ class GoogleMapApiKey(ApiKey):
     def __init__(self, apikey):
         self.apikey = apikey
 
-    def user_01_get_primary_key(self):
+    def get_primary_key(self):
         return self.apikey
 
-    def user_02_create_client(self):
+    def create_client(self):
         return GoogleMapApiClient(self.apikey)
 
-    def user_03_test_usable(self, client):
+    def test_usability(self, client):
         if "99" in self.apikey:
             return False
         response = client.get_lat_lng_by_address(
