@@ -7,6 +7,7 @@ built-in stats collector service for api usage and status.
 
 import sys
 import random
+import inspect
 from collections import OrderedDict
 from sqlalchemy import create_engine
 
@@ -157,6 +158,8 @@ class ApiKeyManager(object):
         self.reach_limit_exc = reach_limit_exc
         self.dummyclient = DummyClient()
         self.dummyclient._apikey_manager = self
+        self.adummyclient = AsyncDummyClient()
+        self.adummyclient._apikey_manager = self
 
     def add_one(self, apikey, upsert=False):
         validate_is_apikey(apikey)
@@ -171,7 +174,10 @@ class ApiKeyManager(object):
 
         if do_insert:
             try:
-                apikey.connect_client()
+                # If the apikey was already connected (e.g. via aconnect_client),
+                # skip the synchronous connect_client() call
+                if not getattr(apikey, "_client_connected", False):
+                    apikey.connect_client()
                 self.apikey_chain[primary_key] = apikey
             except Exception as e:  # pragma: no cover
                 sys.stdout.write(
@@ -220,3 +226,122 @@ class ApiKeyManager(object):
 
 def create_sqlite():
     return create_engine("sqlite:///:memory:")
+
+
+# ── Async variants ──────────────────────────────────────────────────
+
+
+class AsyncApiCaller(object):
+    """Async version of ApiCaller — awaits coroutine results and records stats."""
+
+    def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc):
+        self.apikey = apikey
+        self.apikey_manager = apikey_manager
+        self.call_method = call_method
+        self.reach_limit_exc = reach_limit_exc
+
+    async def __call__(self, *args, **kwargs):
+        try:
+            res = self.call_method(*args, **kwargs)
+            # If the resolved method is a coroutine, await it
+            if inspect.isawaitable(res):
+                res = await res
+            self.apikey_manager.stats.add_event(
+                self.apikey.primary_key, StatusCollection.c1_Success.id,
+            )
+            return res
+        except self.reach_limit_exc as e:
+            self.apikey_manager.remove_one(self.apikey.primary_key)
+            self.apikey_manager.stats.add_event(
+                self.apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+            )
+            raise e
+        except Exception as e:
+            self.apikey_manager.stats.add_event(
+                self.apikey.primary_key, StatusCollection.c5_Failed.id,
+            )
+            raise e
+
+
+class AsyncChainProxy(object):
+    """Async version of ChainProxy.
+
+    Behaves identically to ChainProxy for attribute navigation (``__getattr__``),
+    but ``__call__`` is an ``async`` method that correctly ``await``s
+    coroutine results from async SDK clients.
+
+    Usage::
+
+        manager = ApiKeyManager([AsyncCoinGeckoKey(k) for k in keys])
+
+        # sync calls still work via dummyclient:
+        result = manager.dummyclient.ping()
+
+        # async calls use adummyclient:
+        result = await manager.adummyclient.coins.simple.price.get(
+            ids="bitcoin", vs_currencies="usd"
+        )
+    """
+
+    def __init__(self, manager, attr_path, reach_limit_exc):
+        self._manager = manager
+        self._attr_path = list(attr_path)
+        self._reach_limit_exc = reach_limit_exc
+
+    def __getattr__(self, item):
+        """Continue navigating down the attribute chain."""
+        return AsyncChainProxy(
+            manager=self._manager,
+            attr_path=self._attr_path + [item],
+            reach_limit_exc=self._reach_limit_exc,
+        )
+
+    async def __call__(self, *args, **kwargs):
+        """End of chain — resolve and execute the actual async call."""
+        apikey = self._manager.random_one()
+        real_client = apikey._client
+
+        target = real_client
+        for i, attr in enumerate(self._attr_path):
+            try:
+                target = getattr(target, attr)
+            except AttributeError:
+                path_shown = ".".join(self._attr_path[: i + 1])
+                raise AttributeError(
+                    "AsyncChainProxy: attribute '{}' not found at step {} "
+                    "of path '{}' on client {!r}".format(
+                        attr, i + 1, ".".join(self._attr_path), type(real_client).__name__
+                    )
+                ) from None
+
+        if not callable(target):
+            path_shown = ".".join(self._attr_path)
+            raise TypeError(
+                "AsyncChainProxy: attribute path '{}' resolved to non-callable "
+                "{} of type {}".format(path_shown, repr(target), type(target).__name__)
+            )
+
+        return await AsyncApiCaller(
+            apikey=apikey,
+            apikey_manager=self._manager,
+            call_method=target,
+            reach_limit_exc=self._reach_limit_exc,
+        )(*args, **kwargs)
+
+    def __repr__(self):
+        return "AsyncChainProxy(path={})".format(".".join(self._attr_path))
+
+
+class AsyncDummyClient(object):
+    """Async entry point for chain calls — mirrors DummyClient but uses AsyncChainProxy."""
+
+    def __init__(self):
+        self._apikey_manager = None
+
+    def __getattr__(self, item):
+        manager = self._apikey_manager
+        return AsyncChainProxy(
+            manager=manager,
+            attr_path=[item],
+            reach_limit_exc=manager.reach_limit_exc,
+        )

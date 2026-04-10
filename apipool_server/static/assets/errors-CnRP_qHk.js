@@ -1,0 +1,1 @@
+function o(e,a="操作失败"){var i;if(!((i=e==null?void 0:e.response)!=null&&i.data))return a;const t=e.response.data;return Array.isArray(t.detail)?t.detail.map(s=>{var r;const n=((r=s.loc)==null?void 0:r.slice(1).join("."))||"";return n?`${n}: ${s.msg}`:s.msg}).join("; "):typeof t.detail=="string"?t.detail:typeof t.message=="string"?t.message:a}export{o as e};

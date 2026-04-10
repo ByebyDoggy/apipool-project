@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import inspect
+
 
 class ApiKey(object):
     """
@@ -74,10 +76,38 @@ class ApiKey(object):
         """
         self._client = self.create_client()
 
+    async def aconnect_client(self):
+        """Async version of connect_client.
+
+        If ``create_client`` is a coroutine function, it will be awaited.
+        Otherwise, it falls back to the synchronous ``create_client``.
+        """
+        if inspect.iscoroutinefunction(self.create_client):
+            self._client = await self.create_client()
+        else:
+            self._client = self.create_client()
+
     def is_usable(self):
         if self._client is None:
             self.connect_client()
         try:
             return self.test_usability(self._client)
+        except:  # pragma: no cover
+            return False
+
+    async def ais_usable(self):
+        """Async version of is_usable.
+
+        Ensures the client is connected (using aconnect_client if needed),
+        then calls test_usability. If test_usability is a coroutine function,
+        it will be awaited.
+        """
+        if self._client is None:
+            await self.aconnect_client()
+        try:
+            result = self.test_usability(self._client)
+            if inspect.isawaitable(result):
+                return await result
+            return result
         except:  # pragma: no cover
             return False
