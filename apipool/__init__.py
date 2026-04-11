@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 __short_description__ = "Multiple API Key Manager (Next Generation, sqlalchemy_mate free)"
 __license__ = "MIT"
 __author__ = "apipool-ng Contributors"
