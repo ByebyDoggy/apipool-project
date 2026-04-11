@@ -8,11 +8,17 @@ built-in stats collector service for api usage and status.
 import sys
 import random
 import inspect
+import threading
+import logging
+import time
 from collections import OrderedDict
+from typing import Callable, List, Optional
 from sqlalchemy import create_engine
 
 from .apikey import ApiKey
 from .stats import StatusCollection, StatsCollector
+
+logger = logging.getLogger(__name__)
 
 
 def validate_is_apikey(obj):
@@ -345,3 +351,443 @@ class AsyncDummyClient(object):
             attr_path=[item],
             reach_limit_exc=manager.reach_limit_exc,
         )
+
+
+# ── Dynamic Key Manager (auto-refresh from server) ──────────────────
+
+
+class DynamicKeyManager(ApiKeyManager):
+    """ApiKeyManager that periodically refreshes its key pool from an
+    ``apipool-server`` instance.
+
+    Given a *key_fetcher* callable (typically :func:`apipool.get_keys`) and
+    an *api_key_factory* callable (e.g. ``lambda raw_key: MyApiKey(raw_key)``),
+    the manager will:
+
+    1. Fetch the latest raw key list from the server at a configurable
+       interval.
+    2. Diff the new list against the current pool.
+    3. **Add** keys that appeared on the server but are missing locally.
+    4. **Remove** keys that disappeared from the server (hard delete).
+    5. Restore previously archived keys if they reappear on the server.
+
+    A background daemon thread handles the periodic refresh.  Call
+    :meth:`shutdown` to stop it gracefully.
+
+    Args:
+        key_fetcher: Callable that returns ``list[str]`` of raw keys.
+            Signature: ``key_fetcher() -> list[str]``.
+        api_key_factory: Callable that converts a raw key string into an
+            :class:`ApiKey` instance.  Signature: ``api_key_factory(raw_key: str) -> ApiKey``.
+        refresh_interval: Seconds between refreshes.  Default 60.
+        reach_limit_exc: Exception type that signals rate-limit exhaustion.
+        db_engine: SQLAlchemy engine for stats.  Defaults to in-memory SQLite.
+        on_keys_added: Optional callback ``callback(added_keys: list[str])``
+            invoked after new keys are added.
+        on_keys_removed: Optional callback ``callback(removed_keys: list[str])``
+            invoked after keys are removed.
+
+    Example::
+
+        from apipool import DynamicKeyManager, get_keys, login
+
+        tokens = login("http://localhost:8000", "alice", "password")
+
+        manager = DynamicKeyManager(
+            key_fetcher=lambda: get_keys(
+                service_url="http://localhost:8000",
+                client_type="coingecko",
+                auth_token=tokens["access_token"],
+            ),
+            api_key_factory=lambda raw_key: CoinGeckoApiKey(raw_key),
+            refresh_interval=120,
+        )
+
+        # Use exactly like a normal ApiKeyManager
+        result = manager.dummyclient.ping()
+
+        # When done
+        manager.shutdown()
+    """
+
+    def __init__(
+        self,
+        key_fetcher: Callable[[], List[str]],
+        api_key_factory: Callable[[str], ApiKey],
+        refresh_interval: float = 60.0,
+        reach_limit_exc=None,
+        db_engine=None,
+        on_keys_added: Optional[Callable[[List[str]], None]] = None,
+        on_keys_removed: Optional[Callable[[List[str]], None]] = None,
+    ):
+        self._key_fetcher = key_fetcher
+        self._api_key_factory = api_key_factory
+        self._refresh_interval = refresh_interval
+        self._on_keys_added = on_keys_added
+        self._on_keys_removed = on_keys_removed
+        self._lock = threading.RLock()
+        self._shutdown_event = threading.Event()
+
+        # Initial fetch
+        try:
+            initial_keys = self._key_fetcher()
+        except Exception:
+            logger.warning("DynamicKeyManager: initial key fetch failed, starting with empty pool")
+            initial_keys = []
+
+        initial_apikeys = [self._api_key_factory(k) for k in initial_keys]
+
+        super().__init__(
+            apikey_list=initial_apikeys,
+            reach_limit_exc=reach_limit_exc,
+            db_engine=db_engine,
+        )
+
+        # Start background refresh thread
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop,
+            name="apipool-dynamic-refresh",
+            daemon=True,
+        )
+        self._refresh_thread.start()
+
+    # ── Thread-safe overrides ────────────────────────────────────────
+
+    def random_one(self):
+        with self._lock:
+            return super().random_one()
+
+    def add_one(self, apikey, upsert=False):
+        with self._lock:
+            return super().add_one(apikey, upsert=upsert)
+
+    def remove_one(self, primary_key):
+        with self._lock:
+            return super().remove_one(primary_key)
+
+    # ── Refresh logic ────────────────────────────────────────────────
+
+    def _refresh_loop(self):
+        """Background loop that periodically refreshes the key pool."""
+        while not self._shutdown_event.wait(timeout=self._refresh_interval):
+            try:
+                self._do_refresh()
+            except Exception:
+                logger.exception("DynamicKeyManager: refresh failed")
+
+    def _do_refresh(self):
+        """Fetch latest keys from server and reconcile with local pool."""
+        try:
+            raw_keys = self._key_fetcher()
+        except Exception:
+            logger.warning("DynamicKeyManager: key fetch failed during refresh", exc_info=True)
+            return
+
+        if raw_keys is None:
+            raw_keys = []
+
+        with self._lock:
+            # Current key identifiers in the active pool
+            current_keys = set(self.apikey_chain.keys())
+            # Also check archived keys — they can be restored
+            archived_keys = set(self.archived_apikey_chain.keys())
+
+            new_key_set = set(raw_keys)
+
+            # Keys to add: in server but not in active pool
+            keys_to_add = new_key_set - current_keys
+            # Keys to remove: in active pool but not on server
+            keys_to_remove = current_keys - new_key_set
+
+            # Restore archived keys that reappear on the server
+            keys_to_restore = keys_to_add & archived_keys
+            # Truly new keys (never seen before)
+            keys_to_create = keys_to_add - archived_keys
+
+            added_identifiers = []
+            removed_identifiers = []
+
+            # Restore archived keys
+            for pk in keys_to_restore:
+                apikey = self.archived_apikey_chain.pop(pk)
+                self.apikey_chain[pk] = apikey
+                added_identifiers.append(pk)
+
+            # Create new keys from factory
+            for raw_key in keys_to_create:
+                try:
+                    apikey = self._api_key_factory(raw_key)
+                    self.add_one(apikey)
+                    added_identifiers.append(raw_key)
+                except Exception:
+                    logger.warning(
+                        "DynamicKeyManager: failed to create ApiKey for %r",
+                        raw_key, exc_info=True,
+                    )
+
+            # Remove keys that disappeared from server
+            for pk in keys_to_remove:
+                try:
+                    super().remove_one(pk)
+                    removed_identifiers.append(pk)
+                except KeyError:
+                    pass
+
+        if added_identifiers and self._on_keys_added:
+            try:
+                self._on_keys_added(added_identifiers)
+            except Exception:
+                logger.warning("DynamicKeyManager: on_keys_added callback failed", exc_info=True)
+
+        if removed_identifiers and self._on_keys_removed:
+            try:
+                self._on_keys_removed(removed_identifiers)
+            except Exception:
+                logger.warning("DynamicKeyManager: on_keys_removed callback failed", exc_info=True)
+
+        if added_identifiers or removed_identifiers:
+            logger.info(
+                "DynamicKeyManager: refresh completed — added %d, removed %d, pool size %d",
+                len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
+            )
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    def shutdown(self):
+        """Stop the background refresh thread gracefully."""
+        self._shutdown_event.set()
+        self._refresh_thread.join(timeout=5.0)
+        logger.info("DynamicKeyManager: shutdown complete")
+
+    @property
+    def pool_size(self) -> int:
+        """Number of active keys in the pool."""
+        with self._lock:
+            return len(self.apikey_chain)
+
+
+class AsyncDynamicKeyManager(ApiKeyManager):
+    """Async version of :class:`DynamicKeyManager`.
+
+    Instead of a background thread, this manager relies on the caller to
+    periodically invoke :meth:`arefresh` (e.g. from an ``asyncio`` task).
+    Alternatively, call :meth:`astart` to launch an auto-refresh task
+    inside the current event loop.
+
+    Args:
+        key_fetcher: Async callable that returns ``list[str]``.
+            Signature: ``await key_fetcher() -> list[str]``.
+        api_key_factory: Same as :class:`DynamicKeyManager`.
+        refresh_interval: Seconds between refreshes.  Default 60.
+        reach_limit_exc: Exception type for rate-limit detection.
+        db_engine: SQLAlchemy engine for stats.
+        on_keys_added: Optional async callback ``await callback(added_keys)``.
+        on_keys_removed: Optional async callback ``await callback(removed_keys)``.
+
+    Example::
+
+        manager = AsyncDynamicKeyManager(
+            key_fetcher=lambda: aget_keys(
+                service_url="http://localhost:8000",
+                client_type="coingecko",
+                auth_token=tokens["access_token"],
+            ),
+            api_key_factory=lambda raw_key: AsyncCoinGeckoKey(raw_key),
+            refresh_interval=120,
+        )
+        await manager.astart()
+
+        # Use like a normal manager
+        result = await manager.adummyclient.ping()
+
+        # When done
+        await manager.ashutdown()
+    """
+
+    def __init__(
+        self,
+        key_fetcher: Callable,
+        api_key_factory: Callable[[str], ApiKey],
+        refresh_interval: float = 60.0,
+        reach_limit_exc=None,
+        db_engine=None,
+        on_keys_added: Optional[Callable] = None,
+        on_keys_removed: Optional[Callable] = None,
+    ):
+        self._key_fetcher = key_fetcher
+        self._api_key_factory = api_key_factory
+        self._refresh_interval = refresh_interval
+        self._on_keys_added = on_keys_added
+        self._on_keys_removed = on_keys_removed
+        self._lock = threading.RLock()
+        self._async_shutdown_event = None  # asyncio.Event, set in astart()
+        self._refresh_task = None
+
+        # Initial fetch (sync — caller should do async init separately)
+        initial_apikeys = []
+
+        super().__init__(
+            apikey_list=initial_apikeys,
+            reach_limit_exc=reach_limit_exc,
+            db_engine=db_engine,
+        )
+
+    # ── Thread-safe overrides ────────────────────────────────────────
+
+    def random_one(self):
+        with self._lock:
+            return super().random_one()
+
+    def add_one(self, apikey, upsert=False):
+        with self._lock:
+            return super().add_one(apikey, upsert=upsert)
+
+    def remove_one(self, primary_key):
+        with self._lock:
+            return super().remove_one(primary_key)
+
+    # ── Async lifecycle ──────────────────────────────────────────────
+
+    async def ainit(self):
+        """Perform the initial async key fetch.  Call this after construction."""
+        try:
+            raw_keys = self._key_fetcher()
+            if inspect.isawaitable(raw_keys):
+                raw_keys = await raw_keys
+        except Exception:
+            logger.warning("AsyncDynamicKeyManager: initial key fetch failed")
+            raw_keys = []
+
+        with self._lock:
+            for raw_key in raw_keys:
+                try:
+                    apikey = self._api_key_factory(raw_key)
+                    self.add_one(apikey)
+                except Exception:
+                    logger.warning(
+                        "AsyncDynamicKeyManager: failed to create ApiKey for %r",
+                        raw_key, exc_info=True,
+                    )
+
+    async def astart(self):
+        """Start the auto-refresh background task in the current event loop."""
+        import asyncio
+        self._async_shutdown_event = asyncio.Event()
+        await self.ainit()
+        self._refresh_task = asyncio.ensure_future(self._arefresh_loop())
+
+    async def ashutdown(self):
+        """Stop the auto-refresh background task."""
+        if self._async_shutdown_event is not None:
+            self._async_shutdown_event.set()
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except Exception:
+                pass
+        logger.info("AsyncDynamicKeyManager: shutdown complete")
+
+    async def _arefresh_loop(self):
+        """Background asyncio task that periodically refreshes the key pool."""
+        import asyncio
+        while not self._async_shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._async_shutdown_event.wait(),
+                    timeout=self._refresh_interval,
+                )
+                # Event was set → shutdown requested
+                return
+            except asyncio.TimeoutError:
+                pass  # Normal timeout → do refresh
+
+            try:
+                await self.arefresh()
+            except Exception:
+                logger.exception("AsyncDynamicKeyManager: refresh failed")
+
+    # ── Async refresh logic ──────────────────────────────────────────
+
+    async def arefresh(self):
+        """Manually trigger a key pool refresh (async)."""
+        try:
+            raw_keys = self._key_fetcher()
+            if inspect.isawaitable(raw_keys):
+                raw_keys = await raw_keys
+        except Exception:
+            logger.warning("AsyncDynamicKeyManager: key fetch failed during refresh", exc_info=True)
+            return
+
+        if raw_keys is None:
+            raw_keys = []
+
+        added_identifiers = []
+        removed_identifiers = []
+
+        with self._lock:
+            current_keys = set(self.apikey_chain.keys())
+            archived_keys = set(self.archived_apikey_chain.keys())
+            new_key_set = set(raw_keys)
+
+            keys_to_add = new_key_set - current_keys
+            keys_to_remove = current_keys - new_key_set
+            keys_to_restore = keys_to_add & archived_keys
+            keys_to_create = keys_to_add - archived_keys
+
+            # Restore archived keys
+            for pk in keys_to_restore:
+                apikey = self.archived_apikey_chain.pop(pk)
+                self.apikey_chain[pk] = apikey
+                added_identifiers.append(pk)
+
+            # Create new keys (async client connect)
+            for raw_key in keys_to_create:
+                try:
+                    apikey = self._api_key_factory(raw_key)
+                    # Use aconnect_client for async SDK initialization
+                    await apikey.aconnect_client()
+                    self.apikey_chain[apikey.primary_key] = apikey
+                    self.stats.add_all_apikey([apikey])
+                    added_identifiers.append(raw_key)
+                except Exception:
+                    logger.warning(
+                        "AsyncDynamicKeyManager: failed to create ApiKey for %r",
+                        raw_key, exc_info=True,
+                    )
+
+            # Remove keys that disappeared from server
+            for pk in keys_to_remove:
+                try:
+                    super().remove_one(pk)
+                    removed_identifiers.append(pk)
+                except KeyError:
+                    pass
+
+        if added_identifiers and self._on_keys_added:
+            try:
+                result = self._on_keys_added(added_identifiers)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.warning("AsyncDynamicKeyManager: on_keys_added callback failed", exc_info=True)
+
+        if removed_identifiers and self._on_keys_removed:
+            try:
+                result = self._on_keys_removed(removed_identifiers)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.warning("AsyncDynamicKeyManager: on_keys_removed callback failed", exc_info=True)
+
+        if added_identifiers or removed_identifiers:
+            logger.info(
+                "AsyncDynamicKeyManager: refresh completed — added %d, removed %d, pool size %d",
+                len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
+            )
+
+    @property
+    def pool_size(self) -> int:
+        """Number of active keys in the pool."""
+        with self._lock:
+            return len(self.apikey_chain)
