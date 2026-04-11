@@ -1,53 +1,69 @@
 import http from './index'
-import type { PageResponse, ApiKeyResponse } from './keys'
+import type { PageResponse } from './keys'
 
 export interface PoolCreate {
   identifier: string
   name: string
   client_type: string
-  description?: string
-  key_identifiers: string[]
+  description?: string | null
+  reach_limit_exception?: string | null
+  rotation_strategy?: string
+  pool_config?: Record<string, any> | null
+  key_identifiers?: string[] | null
 }
 
 export interface PoolUpdate {
-  name?: string
-  description?: string
+  name?: string | null
+  description?: string | null
+  reach_limit_exception?: string | null
+  rotation_strategy?: string | null
+  pool_config?: Record<string, any> | null
 }
 
 export interface PoolMemberAdd {
   key_identifiers: string[]
+  priority?: number
+  weight?: number
 }
 
 export interface PoolResponse {
   id: number
   identifier: string
   name: string
-  client_type: string
   description: string | null
+  client_type: string
+  reach_limit_exception: string | null
+  rotation_strategy: string
+  pool_config: Record<string, any> | null
   is_active: boolean
-  total_keys: number
-  active_keys: number
-  members?: PoolMemberResponse[]
-  created_at: string
-  updated_at: string
+  member_count: number
+  members: PoolMemberResponse[] | null
+  created_at: string | null
+  updated_at: string | null
 }
 
 export interface PoolMemberResponse {
-  id: number
-  identifier: string
+  key_identifier: string
   alias: string | null
-  client_type: string
-  is_active: boolean
-  is_valid: boolean
-  added_at: string
+  priority: number
+  weight: number
+  verification_status: string
 }
 
 export interface PoolStatusResponse {
-  identifier: string
-  available: number
-  archived: number
-  total: number
-  is_active: boolean
+  pool_identifier: string
+  available_keys: number
+  archived_keys: number
+  total_keys: number
+  recent_stats: Record<string, number> | null
+}
+
+export interface PoolConfigResponse {
+  pool_identifier: string
+  client_type: string
+  reach_limit_exception: string | null
+  rotation_strategy: string
+  pool_config: Record<string, any> | null
 }
 
 export function listPools(params?: { page?: number; page_size?: number }) {
@@ -80,4 +96,8 @@ export function removeMember(poolIdentifier: string, keyIdentifier: string) {
 
 export function getPoolStatus(identifier: string) {
   return http.get<PoolStatusResponse>(`/pools/${identifier}/status`)
+}
+
+export function getPoolConfig(identifier: string) {
+  return http.get<PoolConfigResponse>(`/pools/${identifier}/config`)
 }

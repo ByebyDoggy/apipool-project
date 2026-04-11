@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 __short_description__ = "Multiple API Key Manager (Next Generation, sqlalchemy_mate free)"
 __license__ = "MIT"
 __author__ = "apipool-ng Contributors"
@@ -13,7 +13,7 @@ __github_username__ = ""
 try:
     from .apikey import ApiKey
     from .manager import (
-        ApiKeyManager, PoolExhaustedError,
+        ApiKeyManager, PoolExhaustedError, BatchResult,
         AsyncApiCaller, AsyncChainProxy, AsyncDummyClient,
         DynamicKeyManager, AsyncDynamicKeyManager,
     )
@@ -22,6 +22,6 @@ except Exception as e:  # pragma: no cover
     pass
 
 try:
-    from .client import connect, login, get_keys, async_connect, alogin, aget_keys
+    from .client import connect, login, get_keys, async_connect, alogin, aget_keys, get_config, aget_config, PoolConfig
 except Exception:  # pragma: no cover
     pass

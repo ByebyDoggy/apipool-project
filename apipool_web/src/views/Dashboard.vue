@@ -67,11 +67,11 @@
 
 # 方式1: 已有 token
 manager = connect("http://localhost:8000", "my-pool", "your-jwt-token")
-result = manager.client.chat.completions.create(model="gpt-4", messages=[...])
+result = manager.dummyclient.some_method()
 
 # 方式2: 用户名密码登录
-token = login("http://localhost:8000", "username", "password")
-manager = connect("http://localhost:8000", "my-pool", token)</code></pre>
+tokens = login("http://localhost:8000", "username", "password")
+manager = connect("http://localhost:8000", "my-pool", tokens["access_token"])</code></pre>
           </div>
         </t-tab-panel>
         <t-tab-panel value="curl" label="cURL">
@@ -81,10 +81,17 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}'
 
-# 代理调用
+# 代理调用 (invoke)
+curl -X POST http://localhost:8000/api/v1/proxy/my-pool/invoke \
+  -H "Authorization: Bearer &lt;token&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"attr_path":["some_method"],"args":[],"kwargs":{}}'
+
+# 代理调用 (call)
 curl -X POST http://localhost:8000/api/v1/proxy/my-pool/call \
   -H "Authorization: Bearer &lt;token&gt;" \
-  -d '{"method_chain":"client.get","args":["/v1/models"]}'</code></pre>
+  -H "Content-Type: application/json" \
+  -d '{"method_chain":"some_method","args":[],"kwargs":{}}'</code></pre>
           </div>
         </t-tab-panel>
       </t-tabs>
@@ -94,9 +101,10 @@ curl -X POST http://localhost:8000/api/v1/proxy/my-pool/call \
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { getUsageStats, type UsageStats } from '@/api/stats'
+import { listPools } from '@/api/pools'
+import { getUsageStats, type StatsUsageResponse } from '@/api/stats'
 
-const stats = ref<UsageStats>({
+const stats = ref({
   total_calls: 0,
   success_calls: 0,
   failed_calls: 0,
@@ -106,8 +114,34 @@ const stats = ref<UsageStats>({
 
 async function loadStats() {
   try {
-    const res = await getUsageStats()
-    stats.value = res.data
+    // First get all pools
+    const poolsRes = await listPools({ page: 1, page_size: 100 })
+    const pools = poolsRes.data.items
+    stats.value.active_pools = pools.filter(p => p.is_active).length
+
+    // Aggregate usage stats from each pool
+    let totalCalls = 0
+    let successCalls = 0
+    let failedCalls = 0
+    let activeKeys = 0
+
+    for (const pool of pools) {
+      try {
+        const res = await getUsageStats(pool.identifier, { seconds: 86400 })
+        const summary = res.data.summary || {}
+        totalCalls += summary.total || 0
+        successCalls += summary.success || 0
+        failedCalls += summary.failed || 0
+        activeKeys += (res.data.by_key ? Object.keys(res.data.by_key).length : 0)
+      } catch {
+        // Individual pool stats may fail, skip
+      }
+    }
+
+    stats.value.total_calls = totalCalls
+    stats.value.success_calls = successCalls
+    stats.value.failed_calls = failedCalls
+    stats.value.active_keys = activeKeys
   } catch {
     // Stats might not be available yet, use defaults
   }

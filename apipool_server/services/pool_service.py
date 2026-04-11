@@ -16,7 +16,7 @@ from ..models.user import User
 from ..security import KeyEncryption
 from ..schemas.pool import (
     PoolCreateRequest, PoolUpdateRequest, PoolAddMembersRequest,
-    PoolResponse, PoolMemberResponse, PoolStatusResponse,
+    PoolResponse, PoolMemberResponse, PoolStatusResponse, PoolConfigResponse,
 )
 from ..services.client_registry import GenericApiKey
 
@@ -49,6 +49,7 @@ class PoolService:
             client_type=req.client_type,
             reach_limit_exception=req.reach_limit_exception,
             rotation_strategy=req.rotation_strategy,
+            pool_config=req.pool_config,
         )
         self.db.add(pool)
         self.db.flush()
@@ -105,6 +106,8 @@ class PoolService:
             pool.reach_limit_exception = req.reach_limit_exception
         if req.rotation_strategy is not None:
             pool.rotation_strategy = req.rotation_strategy
+        if req.pool_config is not None:
+            pool.pool_config = req.pool_config
 
         self.db.commit()
         self.db.refresh(pool)
@@ -266,6 +269,17 @@ class PoolService:
         except (ImportError, AttributeError, ValueError):
             return None
 
+    def get_config(self, user: User, identifier: str) -> PoolConfigResponse:
+        """Get pool configuration for client-side sync."""
+        pool = self._get_pool(user, identifier)
+        return PoolConfigResponse(
+            pool_identifier=pool.identifier,
+            client_type=pool.client_type,
+            reach_limit_exception=pool.reach_limit_exception,
+            rotation_strategy=pool.rotation_strategy,
+            pool_config=pool.pool_config,
+        )
+
     def _to_response(self, pool: KeyPool, include_members: bool = False) -> PoolResponse:
         members_resp = None
         if include_members:
@@ -288,6 +302,7 @@ class PoolService:
             client_type=pool.client_type,
             reach_limit_exception=pool.reach_limit_exception,
             rotation_strategy=pool.rotation_strategy,
+            pool_config=pool.pool_config,
             is_active=pool.is_active,
             member_count=len(pool.members),
             members=members_resp,

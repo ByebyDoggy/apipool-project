@@ -11,8 +11,10 @@ import inspect
 import threading
 import logging
 import time
+import asyncio
 from collections import OrderedDict
-from typing import Callable, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import create_engine
 
 from .apikey import ApiKey
@@ -137,6 +139,35 @@ class NeverRaisesError(Exception):
     pass
 
 
+@dataclass
+class BatchResult:
+    """Result container for :meth:`ApiKeyManager.batch_exec` and
+    :meth:`ApiKeyManager.abatch_exec`.
+
+    Attributes:
+        total: Total number of items submitted.
+        succeeded: Number of items that completed successfully.
+        failed: Number of items that failed after all retries.
+        results: Dict mapping ``item_id`` → result value (successful items only).
+        errors: Dict mapping ``item_id`` → last exception (failed items only).
+        banned_keys: Dict mapping ``primary_key`` → ban expiry timestamp.
+        elapsed: Wall-clock seconds for the entire batch.
+    """
+
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    results: Dict[Any, Any] = field(default_factory=dict)
+    errors: Dict[Any, Exception] = field(default_factory=dict)
+    banned_keys: Dict[str, float] = field(default_factory=dict)
+    elapsed: float = 0.0
+
+    @property
+    def success_rate(self) -> float:
+        """Fraction of items that succeeded (0.0 ~ 1.0)."""
+        return self.succeeded / self.total if self.total else 0.0
+
+
 class ApiKeyManager(object):
     _settings_api_client_class = None
 
@@ -160,12 +191,15 @@ class ApiKeyManager(object):
         self.archived_apikey_chain = OrderedDict()
 
         if reach_limit_exc is None:
-            reach_limit_exc = NeverRaisesError
+            reach_limit_exc = Exception
         self.reach_limit_exc = reach_limit_exc
         self.dummyclient = DummyClient()
         self.dummyclient._apikey_manager = self
         self.adummyclient = AsyncDummyClient()
         self.adummyclient._apikey_manager = self
+
+        # Pool configuration (synced from server or set manually)
+        self._config = None
 
     def add_one(self, apikey, upsert=False):
         validate_is_apikey(apikey)
@@ -229,9 +263,630 @@ class ApiKeyManager(object):
             for key in self.archived_apikey_chain:
                 sys.stdout.write("\n    %s: %r" % (key, apikey))
 
+    # ── Configuration ────────────────────────────────────────────────
+
+    @property
+    def config(self):
+        """Current pool configuration (``PoolConfig`` or ``None``)."""
+        return self._config
+
+    def apply_config(self, config) -> None:
+        """Apply a :class:`~apipool.client.PoolConfig` to this manager.
+
+        Updates the following manager attributes based on the config:
+
+        - ``reach_limit_exc`` — resolved from ``config.reach_limit_exception``
+        - ``_config`` — stored for reference
+
+        The ``concurrency``, ``timeout``, ``rate_limit`` etc. are consumed
+        by :meth:`call_concurrent` and :meth:`acall_concurrent`.
+        """
+        self._config = config
+
+        # Resolve reach_limit_exception from config if still at default (Exception)
+        if config.reach_limit_exception and self.reach_limit_exc is Exception:
+            resolved = self._resolve_exception_class(config.reach_limit_exception)
+            if resolved is not None:
+                self.reach_limit_exc = resolved
+
+    @staticmethod
+    def _resolve_exception_class(dotted_path: str):
+        """Dynamically import an exception class from a dotted path string."""
+        try:
+            module_path, class_name = dotted_path.rsplit(".", 1)
+            module = __import__(module_path, fromlist=[class_name])
+            return getattr(module, class_name)
+        except (ImportError, AttributeError, ValueError):
+            return None
+
+    # ── Concurrent execution ─────────────────────────────────────────
+
+    def call_concurrent(
+        self,
+        method_name: str,
+        args_list: List[tuple],
+        kwargs_list: Optional[List[dict]] = None,
+        max_concurrency: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> List[Any]:
+        """Execute the same method concurrently across multiple argument sets.
+
+        Each call goes through the normal ``dummyclient`` chain (key selection,
+        rotation, stats).  Concurrency is bounded by ``max_concurrency``
+        (defaults to ``config.concurrency`` or unlimited if 0).
+
+        Args:
+            method_name: Attribute path on ``dummyclient`` (e.g. ``"some_method"``).
+            args_list: List of positional argument tuples for each call.
+            kwargs_list: Optional list of keyword argument dicts.
+            max_concurrency: Override for max concurrent calls.
+            timeout: Per-call timeout override in seconds.
+
+        Returns:
+            List of results in the same order as ``args_list``.
+            Failed calls raise immediately unless handled by reach_limit_exc.
+        """
+        if kwargs_list is None:
+            kwargs_list = [{}] * len(args_list)
+
+        if len(args_list) != len(kwargs_list):
+            raise ValueError("args_list and kwargs_list must have the same length")
+
+        # Determine concurrency limit
+        if max_concurrency is None:
+            max_concurrency = self._config.concurrency if self._config else 0
+        if timeout is None:
+            timeout = self._config.timeout if self._config else 30.0
+
+        # Resolve the method via ChainProxy
+        chain = self.dummyclient
+        for attr in method_name.split("."):
+            chain = getattr(chain, attr)
+
+        results = [None] * len(args_list)
+        errors = [None] * len(args_list)
+
+        def _worker(index):
+            try:
+                results[index] = chain(*args_list[index], **kwargs_list[index])
+            except Exception as e:
+                errors[index] = e
+
+        if max_concurrency <= 0:
+            # Unlimited: use ThreadPoolExecutor with all tasks
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=len(args_list)) as pool:
+                futures = {pool.submit(_worker, i): i for i in range(len(args_list))}
+                for future in as_completed(futures):
+                    future.result()  # Propagate exceptions
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+                futures = [pool.submit(_worker, i) for i in range(len(args_list))]
+                for f in futures:
+                    f.result()
+
+        # Raise first error if any
+        for i, err in enumerate(errors):
+            if err is not None:
+                raise err
+
+        return results
+
+    async def acall_concurrent(
+        self,
+        method_name: str,
+        args_list: List[tuple],
+        kwargs_list: Optional[List[dict]] = None,
+        max_concurrency: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> List[Any]:
+        """Async version of :meth:`call_concurrent`.
+
+        Uses ``asyncio.Semaphore`` for concurrency control and ``asyncio.wait_for``
+        for per-call timeout.
+        """
+        if kwargs_list is None:
+            kwargs_list = [{}] * len(args_list)
+
+        if len(args_list) != len(kwargs_list):
+            raise ValueError("args_list and kwargs_list must have the same length")
+
+        if max_concurrency is None:
+            max_concurrency = self._config.concurrency if self._config else 0
+        if timeout is None:
+            timeout = self._config.timeout if self._config else 30.0
+
+        # Resolve the method via AsyncChainProxy
+        chain = self.adummyclient
+        for attr in method_name.split("."):
+            chain = getattr(chain, attr)
+
+        semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+
+        async def _worker(index):
+            if semaphore:
+                async with semaphore:
+                    return await asyncio.wait_for(
+                        chain(*args_list[index], **kwargs_list[index]),
+                        timeout=timeout,
+                    )
+            else:
+                return await asyncio.wait_for(
+                    chain(*args_list[index], **kwargs_list[index]),
+                    timeout=timeout,
+                )
+
+        tasks = [_worker(i) for i in range(len(args_list))]
+        return await asyncio.gather(*tasks, return_exceptions=False)
+
+    # ── Batch execution ─────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_stats(stats, primary_key, status_id):
+        """Record a stats event without letting DB errors propagate."""
+        try:
+            stats.add_event(primary_key, status_id)
+        except Exception:
+            logger.debug("batch_exec: stats recording failed (ignored)", exc_info=True)
+
+    def _resolve_method(self, apikey, method_name: str):
+        """Resolve an attribute path on an ApiKey's client object."""
+        target = apikey._client
+        for attr in method_name.split("."):
+            target = getattr(target, attr)
+        if not callable(target):
+            raise TypeError(
+                f"batch_exec: '{method_name}' resolved to non-callable "
+                f"{type(target).__name__}"
+            )
+        return target
+
+    def _get_available_keys(self) -> List[ApiKey]:
+        """Return a snapshot of active keys (thread-safe)."""
+        with self._lock if hasattr(self, "_lock") else _dummy_context():
+            return list(self.apikey_chain.values())
+
+    def batch_exec(
+        self,
+        method_name: str,
+        items: List[Tuple[Any, tuple, dict]],
+        max_concurrency: Optional[int] = None,
+        timeout: Optional[float] = None,
+        retry_on_failure: Optional[bool] = None,
+        max_retries: Optional[int] = None,
+        ban_threshold: Optional[int] = None,
+        ban_duration: Optional[float] = None,
+    ) -> BatchResult:
+        """Execute a batch of unique API calls with retry, key rotation,
+        and temporary key banning.
+
+        This method is designed for high-volume workloads such as fetching
+        10 000 token prices from CoinGecko.  Each item is uniquely
+        identified and executed **at most once**.  When an API call fails,
+        the item is retried on a *different* key (rotation).  Keys that
+        accumulate ``ban_threshold`` consecutive failures are temporarily
+        banned from the batch group for ``ban_duration`` seconds.
+
+        All tuning parameters fall back to ``manager.config`` values when
+        not explicitly provided, and those in turn fall back to sensible
+        defaults — so the server can centrally control batch behaviour.
+
+        Stats recording is best-effort: database errors (e.g. SQLite
+        thread-safety issues) are silently ignored and never cause an
+        item to fail.
+
+        Args:
+            method_name: Attribute path on each key's client
+                (e.g. ``"coins.simple.price.get"``).
+            items: List of ``(item_id, args_tuple, kwargs_dict)`` triples.
+                ``item_id`` must be unique across the batch — it is used
+                as the deduplication key and for result mapping.
+            max_concurrency: Max parallel calls (0 = unlimited).
+            timeout: Per-call timeout in seconds.
+            retry_on_failure: Retry failed items on another key.
+            max_retries: Max retry attempts per item.
+            ban_threshold: Consecutive failures before a key is banned.
+            ban_duration: Seconds a banned key is excluded.
+
+        Returns:
+            :class:`BatchResult` with per-item results/errors and stats.
+
+        Example::
+
+            items = [
+                ("bitcoin",  (), {"ids": "bitcoin", "vs_currencies": "usd"}),
+                ("ethereum", (), {"ids": "ethereum", "vs_currencies": "usd"}),
+                # ... 10 000 more
+            ]
+            result = manager.batch_exec("coins.simple.price.get", items)
+            print(f"Success: {result.succeeded}/{result.total}")
+        """
+        start = time.monotonic()
+
+        # ── Resolve parameters from config ───────────────────────
+        if max_concurrency is None:
+            max_concurrency = self._config.concurrency if self._config else 0
+        if timeout is None:
+            timeout = self._config.timeout if self._config else 30.0
+        if retry_on_failure is None:
+            retry_on_failure = (
+                self._config.effective_batch_retry
+                if self._config
+                else False
+            )
+        if max_retries is None:
+            max_retries = (
+                self._config.effective_batch_max_retries
+                if self._config
+                else 0
+            )
+        if ban_threshold is None:
+            ban_threshold = self._config.ban_threshold if self._config else 3
+        if ban_duration is None:
+            ban_duration = self._config.ban_duration if self._config else 300.0
+
+        # ── Shared mutable state (protected by lock) ─────────────
+        lock = threading.Lock()
+        # primary_key → consecutive failure count
+        key_fail_counts: Dict[str, int] = {}
+        # primary_key → ban expiry timestamp
+        banned_keys: Dict[str, float] = {}
+        # Results
+        results: Dict[Any, Any] = {}
+        errors: Dict[Any, Exception] = {}
+
+        # Use a round-robin index to spread load across keys
+        _rr_index = [0]
+
+        def _is_key_available(primary_key: str) -> bool:
+            """Check whether a key is usable (not banned)."""
+            if primary_key in banned_keys:
+                if time.monotonic() < banned_keys[primary_key]:
+                    return False
+                else:
+                    # Ban expired — readmit
+                    del banned_keys[primary_key]
+                    key_fail_counts.pop(primary_key, None)
+            return True
+
+        def _pick_key() -> Optional[ApiKey]:
+            """Pick an available key, skipping banned ones."""
+            available = self._get_available_keys()
+            if not available:
+                return None
+            # Round-robin with fallback to find an unbanned key
+            with lock:
+                start_idx = _rr_index[0] % len(available)
+            for offset in range(len(available)):
+                idx = (start_idx + offset) % len(available)
+                ak = available[idx]
+                if _is_key_available(ak.primary_key):
+                    with lock:
+                        _rr_index[0] = idx + 1
+                    return ak
+            return None
+
+        def _record_key_success(primary_key: str) -> None:
+            with lock:
+                key_fail_counts.pop(primary_key, None)
+
+        def _record_key_failure(primary_key: str) -> None:
+            with lock:
+                key_fail_counts[primary_key] = key_fail_counts.get(primary_key, 0) + 1
+                if key_fail_counts[primary_key] >= ban_threshold:
+                    banned_keys[primary_key] = time.monotonic() + ban_duration
+                    logger.info(
+                        "batch_exec: key %s banned for %.0fs after %d failures",
+                        primary_key, ban_duration, ban_threshold,
+                    )
+
+        def _try_item(item_id: Any, args: tuple, kwargs: dict) -> Optional[Any]:
+            """Execute one item. Returns result on success, None on failure
+            (error stored in ``errors``)."""
+            last_exc: Optional[Exception] = None
+            attempts = 1 + (max_retries if retry_on_failure else 0)
+            used_keys: set = set()
+
+            for attempt in range(attempts):
+                apikey = _pick_key()
+                if apikey is None:
+                    last_exc = PoolExhaustedError(
+                        "No available keys (all banned or exhausted)"
+                    )
+                    break
+
+                # Skip keys already tried for this item (ensure rotation)
+                if apikey.primary_key in used_keys:
+                    # Try to find a different key
+                    all_keys = self._get_available_keys()
+                    found_alt = False
+                    for ak in all_keys:
+                        if ak.primary_key not in used_keys and _is_key_available(ak.primary_key):
+                            apikey = ak
+                            found_alt = True
+                            break
+                    if not found_alt:
+                        # All available keys already tried — retry anyway
+                        pass
+
+                used_keys.add(apikey.primary_key)
+
+                try:
+                    target = self._resolve_method(apikey, method_name)
+                    result = target(*args, **kwargs)
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id
+                    )
+                    _record_key_success(apikey.primary_key)
+                    return result
+                except self.reach_limit_exc as e:
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id
+                    )
+                    # Key hit rate limit — remove from pool + ban
+                    with self._lock if hasattr(self, "_lock") else _dummy_context():
+                        if apikey.primary_key in self.apikey_chain:
+                            self.remove_one(apikey.primary_key)
+                    banned_keys[apikey.primary_key] = time.monotonic() + ban_duration
+                    last_exc = e
+                    if not retry_on_failure:
+                        break
+                except Exception as e:
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                    )
+                    _record_key_failure(apikey.primary_key)
+                    last_exc = e
+                    if not retry_on_failure:
+                        break
+
+            # All attempts exhausted
+            with lock:
+                errors[item_id] = last_exc
+            return None
+
+        # ── Execute with ThreadPoolExecutor ───────────────────────
+        from concurrent.futures import ThreadPoolExecutor
+
+        effective_workers = max_concurrency if max_concurrency > 0 else min(len(items), 64)
+
+        with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            future_map = {}
+            for item_id, args, kwargs in items:
+                fut = pool.submit(_try_item, item_id, args, kwargs)
+                future_map[fut] = item_id
+
+            for fut in list(future_map.keys()):
+                item_id = future_map[fut]
+                try:
+                    result = fut.result(timeout=timeout * (max_retries + 1))
+                    if result is not None:
+                        with lock:
+                            results[item_id] = result
+                except Exception as e:
+                    with lock:
+                        errors[item_id] = e
+
+        elapsed = time.monotonic() - start
+        return BatchResult(
+            total=len(items),
+            succeeded=len(results),
+            failed=len(errors),
+            results=results,
+            errors=errors,
+            banned_keys=dict(banned_keys),
+            elapsed=elapsed,
+        )
+
+    async def abatch_exec(
+        self,
+        method_name: str,
+        items: List[Tuple[Any, tuple, dict]],
+        max_concurrency: Optional[int] = None,
+        timeout: Optional[float] = None,
+        retry_on_failure: Optional[bool] = None,
+        max_retries: Optional[int] = None,
+        ban_threshold: Optional[int] = None,
+        ban_duration: Optional[float] = None,
+    ) -> BatchResult:
+        """Async version of :meth:`batch_exec`.
+
+        Uses ``asyncio.Semaphore`` for concurrency control and
+        ``asyncio.wait_for`` for per-call timeout.  All parameters have
+        the same meaning as the synchronous version.
+
+        Example::
+
+            items = [
+                ("bitcoin",  (), {"ids": "bitcoin"}),
+                ("ethereum", (), {"ids": "ethereum"}),
+            ]
+            result = await manager.abatch_exec("coins.simple.price.get", items)
+        """
+        start = time.monotonic()
+
+        # ── Resolve parameters from config ───────────────────────
+        if max_concurrency is None:
+            max_concurrency = self._config.concurrency if self._config else 0
+        if timeout is None:
+            timeout = self._config.timeout if self._config else 30.0
+        if retry_on_failure is None:
+            retry_on_failure = (
+                self._config.effective_batch_retry
+                if self._config
+                else False
+            )
+        if max_retries is None:
+            max_retries = (
+                self._config.effective_batch_max_retries
+                if self._config
+                else 0
+            )
+        if ban_threshold is None:
+            ban_threshold = self._config.ban_threshold if self._config else 3
+        if ban_duration is None:
+            ban_duration = self._config.ban_duration if self._config else 300.0
+
+        # ── Shared mutable state ─────────────────────────────────
+        lock = asyncio.Lock()
+        # primary_key → consecutive failure count
+        key_fail_counts: Dict[str, int] = {}
+        # primary_key → ban expiry timestamp
+        banned_keys: Dict[str, float] = {}
+        # Results
+        results: Dict[Any, Any] = {}
+        errors: Dict[Any, Exception] = {}
+        # Round-robin index
+        _rr_index = [0]
+
+        def _is_key_available(primary_key: str) -> bool:
+            if primary_key in banned_keys:
+                if time.monotonic() < banned_keys[primary_key]:
+                    return False
+                else:
+                    del banned_keys[primary_key]
+                    key_fail_counts.pop(primary_key, None)
+            return True
+
+        async def _pick_key() -> Optional[ApiKey]:
+            available = self._get_available_keys()
+            if not available:
+                return None
+            start_idx = _rr_index[0] % len(available)
+            for offset in range(len(available)):
+                idx = (start_idx + offset) % len(available)
+                ak = available[idx]
+                if _is_key_available(ak.primary_key):
+                    _rr_index[0] = idx + 1
+                    return ak
+            return None
+
+        async def _record_key_success(primary_key: str) -> None:
+            async with lock:
+                key_fail_counts.pop(primary_key, None)
+
+        async def _record_key_failure(primary_key: str) -> None:
+            async with lock:
+                key_fail_counts[primary_key] = key_fail_counts.get(primary_key, 0) + 1
+                if key_fail_counts[primary_key] >= ban_threshold:
+                    banned_keys[primary_key] = time.monotonic() + ban_duration
+                    logger.info(
+                        "abatch_exec: key %s banned for %.0fs after %d failures",
+                        primary_key, ban_duration, ban_threshold,
+                    )
+
+        async def _try_item(item_id: Any, args: tuple, kwargs: dict) -> Optional[Any]:
+            last_exc: Optional[Exception] = None
+            attempts = 1 + (max_retries if retry_on_failure else 0)
+            used_keys: set = set()
+
+            for attempt in range(attempts):
+                apikey = await _pick_key()
+                if apikey is None:
+                    last_exc = PoolExhaustedError(
+                        "No available keys (all banned or exhausted)"
+                    )
+                    break
+
+                # Skip keys already tried for this item
+                if apikey.primary_key in used_keys:
+                    all_keys = self._get_available_keys()
+                    found_alt = False
+                    for ak in all_keys:
+                        if ak.primary_key not in used_keys and _is_key_available(ak.primary_key):
+                            apikey = ak
+                            found_alt = True
+                            break
+                    if not found_alt:
+                        pass  # All keys tried, retry with same key
+
+                used_keys.add(apikey.primary_key)
+
+                try:
+                    target = self._resolve_method(apikey, method_name)
+                    result = target(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        result = await asyncio.wait_for(result, timeout=timeout)
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id
+                    )
+                    await _record_key_success(apikey.primary_key)
+                    return result
+                except self.reach_limit_exc as e:
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id
+                    )
+                    with self._lock if hasattr(self, "_lock") else _dummy_context():
+                        if apikey.primary_key in self.apikey_chain:
+                            self.remove_one(apikey.primary_key)
+                    banned_keys[apikey.primary_key] = time.monotonic() + ban_duration
+                    last_exc = e
+                    if not retry_on_failure:
+                        break
+                except asyncio.TimeoutError as e:
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                    )
+                    await _record_key_failure(apikey.primary_key)
+                    last_exc = e
+                    if not retry_on_failure:
+                        break
+                except Exception as e:
+                    self._safe_stats(
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                    )
+                    await _record_key_failure(apikey.primary_key)
+                    last_exc = e
+                    if not retry_on_failure:
+                        break
+
+            async with lock:
+                errors[item_id] = last_exc
+            return None
+
+        # ── Execute with asyncio semaphore ────────────────────────
+        semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+
+        async def _run_item(item_id: Any, args: tuple, kwargs: dict):
+            if semaphore:
+                async with semaphore:
+                    result = await _try_item(item_id, args, kwargs)
+            else:
+                result = await _try_item(item_id, args, kwargs)
+            if result is not None:
+                async with lock:
+                    results[item_id] = result
+
+        tasks = [_run_item(item_id, args, kwargs) for item_id, args, kwargs in items]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        elapsed = time.monotonic() - start
+        return BatchResult(
+            total=len(items),
+            succeeded=len(results),
+            failed=len(errors),
+            results=results,
+            errors=errors,
+            banned_keys=dict(banned_keys),
+            elapsed=elapsed,
+        )
+
 
 def create_sqlite():
     return create_engine("sqlite:///:memory:")
+
+
+class _DummyContext:
+    """A no-op context manager for code that conditionally needs a lock."""
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+
+
+def _dummy_context():
+    return _DummyContext()
 
 
 # ── Async variants ──────────────────────────────────────────────────
@@ -419,12 +1074,14 @@ class DynamicKeyManager(ApiKeyManager):
         db_engine=None,
         on_keys_added: Optional[Callable[[List[str]], None]] = None,
         on_keys_removed: Optional[Callable[[List[str]], None]] = None,
+        config_fetcher: Optional[Callable] = None,
     ):
         self._key_fetcher = key_fetcher
         self._api_key_factory = api_key_factory
         self._refresh_interval = refresh_interval
         self._on_keys_added = on_keys_added
         self._on_keys_removed = on_keys_removed
+        self._config_fetcher = config_fetcher
         self._lock = threading.RLock()
         self._shutdown_event = threading.Event()
 
@@ -442,6 +1099,14 @@ class DynamicKeyManager(ApiKeyManager):
             reach_limit_exc=reach_limit_exc,
             db_engine=db_engine,
         )
+
+        # Initial config sync
+        if self._config_fetcher:
+            try:
+                config = self._config_fetcher()
+                self.apply_config(config)
+            except Exception:
+                logger.warning("DynamicKeyManager: initial config sync failed", exc_info=True)
 
         # Start background refresh thread
         self._refresh_thread = threading.Thread(
@@ -551,6 +1216,14 @@ class DynamicKeyManager(ApiKeyManager):
                 len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
             )
 
+        # Sync config from server
+        if self._config_fetcher:
+            try:
+                config = self._config_fetcher()
+                self.apply_config(config)
+            except Exception:
+                logger.warning("DynamicKeyManager: config sync failed during refresh", exc_info=True)
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def shutdown(self):
@@ -613,12 +1286,14 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         db_engine=None,
         on_keys_added: Optional[Callable] = None,
         on_keys_removed: Optional[Callable] = None,
+        config_fetcher: Optional[Callable] = None,
     ):
         self._key_fetcher = key_fetcher
         self._api_key_factory = api_key_factory
         self._refresh_interval = refresh_interval
         self._on_keys_added = on_keys_added
         self._on_keys_removed = on_keys_removed
+        self._config_fetcher = config_fetcher
         self._lock = threading.RLock()
         self._async_shutdown_event = None  # asyncio.Event, set in astart()
         self._refresh_task = None
@@ -668,6 +1343,16 @@ class AsyncDynamicKeyManager(ApiKeyManager):
                         "AsyncDynamicKeyManager: failed to create ApiKey for %r",
                         raw_key, exc_info=True,
                     )
+
+        # Initial config sync
+        if self._config_fetcher:
+            try:
+                config = self._config_fetcher()
+                if inspect.isawaitable(config):
+                    config = await config
+                self.apply_config(config)
+            except Exception:
+                logger.warning("AsyncDynamicKeyManager: initial config sync failed", exc_info=True)
 
     async def astart(self):
         """Start the auto-refresh background task in the current event loop."""
@@ -785,6 +1470,16 @@ class AsyncDynamicKeyManager(ApiKeyManager):
                 "AsyncDynamicKeyManager: refresh completed — added %d, removed %d, pool size %d",
                 len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
             )
+
+        # Sync config from server
+        if self._config_fetcher:
+            try:
+                config = self._config_fetcher()
+                if inspect.isawaitable(config):
+                    config = await config
+                self.apply_config(config)
+            except Exception:
+                logger.warning("AsyncDynamicKeyManager: config sync failed during refresh", exc_info=True)
 
     @property
     def pool_size(self) -> int:

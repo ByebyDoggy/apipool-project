@@ -31,9 +31,9 @@
             {{ row.is_active ? '启用' : '停用' }}
           </t-tag>
         </template>
-        <template #is_valid="{ row }">
-          <t-tag :theme="row.is_valid ? 'success' : 'danger'" variant="light" size="small">
-            {{ row.is_valid ? '有效' : '无效' }}
+        <template #verification_status="{ row }">
+          <t-tag :theme="row.verification_status === 'verified' ? 'success' : row.verification_status === 'unverified' ? 'warning' : 'danger'" variant="light" size="small">
+            {{ row.verification_status === 'verified' ? '已验证' : row.verification_status === 'unverified' ? '未验证' : '失败' }}
           </t-tag>
         </template>
         <template #tags="{ row }">
@@ -141,7 +141,7 @@ const columns = [
   { colKey: 'client_type', title: '服务类型', width: 120 },
   { colKey: 'tags', title: '标签', width: 160, cell: 'tags' },
   { colKey: 'is_active', title: '状态', width: 80, cell: 'is_active' },
-  { colKey: 'is_valid', title: '有效', width: 80, cell: 'is_valid' },
+  { colKey: 'verification_status', title: '验证状态', width: 100, cell: 'verification_status' },
   { colKey: 'updated_at', title: '更新时间', width: 170 },
   { colKey: 'op', title: '操作', width: 160, cell: 'op' },
 ]
@@ -183,7 +183,7 @@ function onEdit(row: ApiKeyResponse) {
 async function onVerify(row: ApiKeyResponse) {
   try {
     const res = await verifyKey(row.identifier)
-    MessagePlugin.success(res.data.is_valid ? 'Key 验证通过' : 'Key 验证失败，可能已失效')
+    MessagePlugin.success(res.data.verification_status === 'verified' ? 'Key 验证通过' : `Key 验证状态: ${res.data.verification_status}`)
     loadKeys()
   } catch {
     MessagePlugin.error('验证请求失败')

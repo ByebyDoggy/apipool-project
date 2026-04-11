@@ -29,6 +29,9 @@ class KeyPool(Base):
         default="random",
     )
 
+    # Pool-level configuration (synced to client managers)
+    pool_config = Column(JSON, nullable=True, comment="Client-synced config: concurrency, timeout, rate_limit, etc.")
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

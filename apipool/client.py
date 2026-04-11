@@ -20,7 +20,98 @@ Asynchronous:
 
 import inspect
 import httpx
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, Callable, List, Optional
 from apipool import ApiKey, ApiKeyManager
+
+
+# ── Pool Configuration ──────────────────────────────────────────────
+
+
+@dataclass
+class PoolConfig:
+    """Configuration synced from the apipool-server.
+
+    This dataclass mirrors the server-side pool_config JSON and provides
+    typed defaults for all configurable parameters.  The client-side
+    ``DynamicKeyManager`` calls :func:`get_config` periodically and
+    applies changes via :meth:`ApiKeyManager.apply_config`.
+
+    Attributes:
+        concurrency: Max number of concurrent API calls (0 = unlimited).
+        timeout: Per-request timeout in seconds.
+        rate_limit: Max requests per key per interval (0 = unlimited).
+        rate_limit_interval: Interval in seconds for rate_limit counting.
+        retry_on_failure: Whether to retry failed calls on another key.
+        max_retries: Maximum retry attempts per item before giving up.
+        custom: Arbitrary key-value pairs for user-defined settings.
+        batch_retry_on_failure: Whether batch_exec retries failed items on
+            another key (defaults to ``retry_on_failure`` if not set).
+        batch_max_retries: Max retries per item in batch_exec (defaults to
+            ``max_retries`` if not set).
+        ban_threshold: Number of consecutive failures before a key is
+            temporarily banned from the batch group.
+        ban_duration: Seconds a key stays banned before being re-admitted.
+        reach_limit_exception: Dotted path to the exception class that
+            signals key exhaustion (e.g. ``"openai.error.RateLimitError"``).
+            When ``None`` or empty, **any** ``Exception`` triggers key
+            rotation (the new default).  Set a specific class to narrow
+            down which errors cause a key swap.
+
+    concurrency: int = 0
+    timeout: float = 30.0
+    rate_limit: int = 0
+    rate_limit_interval: int = 60
+    retry_on_failure: bool = False
+    max_retries: int = 0
+    custom: dict = field(default_factory=dict)
+
+    # Batch execution tuning
+    batch_retry_on_failure: Optional[bool] = None  # fallback: retry_on_failure
+    batch_max_retries: Optional[int] = None         # fallback: max_retries
+    ban_threshold: int = 3
+    ban_duration: float = 300.0
+
+    # Server-level fields (not in pool_config JSON, but from pool record)
+    reach_limit_exception: Optional[str] = None
+    rotation_strategy: str = "random"
+    client_type: str = ""
+
+    @property
+    def effective_batch_retry(self) -> bool:
+        """Resolved batch retry setting (falls back to retry_on_failure)."""
+        if self.batch_retry_on_failure is not None:
+            return self.batch_retry_on_failure
+        return self.retry_on_failure
+
+    @property
+    def effective_batch_max_retries(self) -> int:
+        """Resolved batch max retries (falls back to max_retries)."""
+        if self.batch_max_retries is not None:
+            return self.batch_max_retries
+        return self.max_retries
+
+    @classmethod
+    def from_server_response(cls, data: dict) -> "PoolConfig":
+        """Build a PoolConfig from the GET /pools/{id}/config response."""
+        raw_config = data.get("pool_config") or {}
+        return cls(
+            concurrency=raw_config.get("concurrency", 0),
+            timeout=raw_config.get("timeout", 30.0),
+            rate_limit=raw_config.get("rate_limit", 0),
+            rate_limit_interval=raw_config.get("rate_limit_interval", 60),
+            retry_on_failure=raw_config.get("retry_on_failure", False),
+            max_retries=raw_config.get("max_retries", 0),
+            custom=raw_config.get("custom", {}),
+            batch_retry_on_failure=raw_config.get("batch_retry_on_failure"),
+            batch_max_retries=raw_config.get("batch_max_retries"),
+            ban_threshold=raw_config.get("ban_threshold", 3),
+            ban_duration=raw_config.get("ban_duration", 300.0),
+            reach_limit_exception=data.get("reach_limit_exception"),
+            rotation_strategy=data.get("rotation_strategy", "random"),
+            client_type=data.get("client_type", ""),
+        )
 
 
 # ── Synchronous client ──────────────────────────────────────────────
@@ -375,3 +466,51 @@ async def aget_keys(
         resp.raise_for_status()
         data = resp.json()
         return [item["raw_key"] for item in data.get("keys", [])]
+
+
+# ── Config sync helpers ─────────────────────────────────────────────
+
+
+def get_config(
+    service_url: str,
+    pool_identifier: str,
+    auth_token: str,
+) -> PoolConfig:
+    """Fetch pool configuration from the apipool-server.
+
+    Returns a :class:`PoolConfig` instance with all server-side settings
+    (concurrency, timeout, rate_limit, reach_limit_exception, etc.)
+    that the client-side manager should apply.
+
+    Args:
+        service_url: Base URL of the apipool server
+        pool_identifier: The pool identifier to query
+        auth_token: JWT access token for authentication
+
+    Returns:
+        PoolConfig — typed configuration object
+    """
+    with httpx.Client(
+        base_url=service_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=30.0,
+    ) as client:
+        resp = client.get(f"/api/v1/pools/{pool_identifier}/config")
+        resp.raise_for_status()
+        return PoolConfig.from_server_response(resp.json())
+
+
+async def aget_config(
+    service_url: str,
+    pool_identifier: str,
+    auth_token: str,
+) -> PoolConfig:
+    """Async version of get_config."""
+    async with httpx.AsyncClient(
+        base_url=service_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {auth_token}"},
+        timeout=30.0,
+    ) as client:
+        resp = await client.get(f"/api/v1/pools/{pool_identifier}/config")
+        resp.raise_for_status()
+        return PoolConfig.from_server_response(resp.json())

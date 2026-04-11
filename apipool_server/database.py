@@ -3,15 +3,48 @@
 
 """Database connection and session management."""
 
-from sqlalchemy import create_engine
+import logging
+
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _engine = None
 _SessionLocal = None
 
 Base = declarative_base()
+
+# Schema migrations: list of (table, column, alter_sql) to add missing columns
+_MIGRATIONS = [
+    # key_pools — new columns added in v1.1
+    ("key_pools", "reach_limit_exception",
+     "ALTER TABLE key_pools ADD COLUMN reach_limit_exception VARCHAR(256)"),
+    ("key_pools", "rotation_strategy",
+     "ALTER TABLE key_pools ADD COLUMN rotation_strategy VARCHAR(16) DEFAULT 'random'"),
+    ("key_pools", "pool_config",
+     "ALTER TABLE key_pools ADD COLUMN pool_config JSON"),
+    # api_key_entries — new columns added in v1.1
+    ("api_key_entries", "client_config",
+     "ALTER TABLE api_key_entries ADD COLUMN client_config JSON"),
+    ("api_key_entries", "is_archived",
+     "ALTER TABLE api_key_entries ADD COLUMN is_archived BOOLEAN DEFAULT 0"),
+    ("api_key_entries", "verification_status",
+     "ALTER TABLE api_key_entries ADD COLUMN verification_status VARCHAR(16) DEFAULT 'unknown'"),
+    ("api_key_entries", "last_verified_at",
+     "ALTER TABLE api_key_entries ADD COLUMN last_verified_at DATETIME"),
+    ("api_key_entries", "tags",
+     "ALTER TABLE api_key_entries ADD COLUMN tags JSON"),
+    ("api_key_entries", "description",
+     "ALTER TABLE api_key_entries ADD COLUMN description TEXT"),
+    # pool_members — new columns added in v1.1
+    ("pool_members", "priority",
+     "ALTER TABLE pool_members ADD COLUMN priority INTEGER DEFAULT 0"),
+    ("pool_members", "weight",
+     "ALTER TABLE pool_members ADD COLUMN weight INTEGER DEFAULT 1"),
+]
 
 
 def get_engine():
@@ -47,6 +80,24 @@ def get_db():
         db.close()
 
 
+def _run_migrations(engine):
+    """Add missing columns to existing tables (simple ALTER TABLE migration)."""
+    inspector = inspect(engine)
+    for table_name, column_name, alter_sql in _MIGRATIONS:
+        if table_name not in inspector.get_table_names():
+            continue
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if column_name not in existing_columns:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(alter_sql))
+                logger.info("Migration: added column %s.%s", table_name, column_name)
+            except Exception as exc:
+                logger.warning("Migration failed for %s.%s: %s", table_name, column_name, exc)
+
+
 def init_db():
-    """Create all tables."""
-    Base.metadata.create_all(bind=get_engine())
+    """Create all tables and run migrations for missing columns."""
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    _run_migrations(engine)

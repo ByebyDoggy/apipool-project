@@ -5,15 +5,16 @@ export interface ApiKeyCreate {
   alias?: string
   raw_key: string
   client_type: string
-  tags?: string[]
-  description?: string
+  client_config?: Record<string, any> | null
+  tags?: string[] | null
+  description?: string | null
 }
 
 export interface ApiKeyUpdate {
-  alias?: string
-  tags?: string[]
-  description?: string
-  is_active?: boolean
+  alias?: string | null
+  tags?: string[] | null
+  description?: string | null
+  client_config?: Record<string, any> | null
 }
 
 export interface ApiKeyRotateRequest {
@@ -25,19 +26,32 @@ export interface ApiKeyResponse {
   identifier: string
   alias: string | null
   client_type: string
-  tags: string[]
-  description: string | null
+  client_config: Record<string, any> | null
   is_active: boolean
-  is_valid: boolean
+  is_archived: boolean
+  verification_status: string
   last_verified_at: string | null
-  created_at: string
-  updated_at: string
+  tags: string[] | null
+  description: string | null
+  created_at: string | null
+  updated_at: string | null
 }
 
 export interface ApiKeyVerifyResponse {
   identifier: string
-  is_valid: boolean
-  message: string
+  verification_status: string
+  verified_at: string
+}
+
+export interface BatchImportRequest {
+  client_type: string
+  keys: { identifier: string; raw_key: string; alias?: string }[]
+}
+
+export interface BatchImportResponse {
+  task_id: string
+  status: string
+  total: number
 }
 
 export interface PageResponse<T> {
@@ -83,6 +97,6 @@ export function rotateKey(identifier: string, new_raw_key: string) {
   return http.patch<ApiKeyResponse>(`/keys/${identifier}/rotate`, { new_raw_key })
 }
 
-export function batchImport(keys: ApiKeyCreate[]) {
-  return http.post<{ imported: number }>('/keys/batch-import', { keys })
+export function batchImport(data: BatchImportRequest) {
+  return http.post<BatchImportResponse>('/keys/batch-import', data)
 }

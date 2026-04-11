@@ -11,7 +11,7 @@ from ...database import get_db
 from ...models.user import User
 from ...schemas.pool import (
     PoolCreateRequest, PoolUpdateRequest, PoolAddMembersRequest,
-    PoolResponse, PoolMemberResponse, PoolStatusResponse,
+    PoolResponse, PoolMemberResponse, PoolStatusResponse, PoolConfigResponse,
 )
 from ...schemas.common import PageResponse
 from ...services.pool_service import PoolService
@@ -82,3 +82,15 @@ def pool_status(identifier: str, user: User = Depends(get_current_user), db: Ses
     """Get pool status (available/archived/total keys)."""
     service = PoolService(db)
     return service.get_status(user, identifier)
+
+
+@router.get("/{identifier}/config", response_model=PoolConfigResponse)
+def pool_config(identifier: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get pool configuration for client-side sync.
+
+    Returns all configurable parameters (concurrency, timeout, rate_limit,
+    reach_limit_exception, rotation_strategy, etc.) so the client-side
+    DynamicKeyManager can apply them without manual configuration.
+    """
+    service = PoolService(db)
+    return service.get_config(user, identifier)

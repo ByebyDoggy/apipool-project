@@ -240,6 +240,203 @@ await manager.ashutdown()
 | `refresh_interval` | `float` | Seconds between refreshes (default 60) |
 | `on_keys_added` | `Callable[[list[str]], None]` | Callback after keys are added |
 | `on_keys_removed` | `Callable[[list[str]], None]` | Callback after keys are removed |
+| `config_fetcher` | `Callable[[], PoolConfig]` | Returns pool config from server (optional) |
+
+## Configuration Sync
+
+`DynamicKeyManager` can automatically sync configuration from the server.
+Pass a `config_fetcher` (typically `get_config` bound with your credentials)
+to enable automatic config synchronization on each refresh cycle.
+
+### PoolConfig
+
+Server-side pool configuration is stored as `pool_config` JSON and synced to
+the client as a `PoolConfig` dataclass:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `concurrency` | `int` | `0` | Max concurrent calls (0 = unlimited) |
+| `timeout` | `float` | `30.0` | Per-request timeout in seconds |
+| `rate_limit` | `int` | `0` | Max requests per key per interval |
+| `rate_limit_interval` | `int` | `60` | Interval for rate limit counting |
+| `retry_on_failure` | `bool` | `False` | Retry failed calls on another key |
+| `max_retries` | `int` | `0` | Maximum retry attempts |
+| `custom` | `dict` | `{}` | Arbitrary key-value settings |
+| `batch_retry_on_failure` | `bool \| None` | `None` | Batch retry (falls back to `retry_on_failure`) |
+| `batch_max_retries` | `int \| None` | `None` | Batch retries (falls back to `max_retries`) |
+| `ban_threshold` | `int` | `3` | Consecutive failures before key ban |
+| `ban_duration` | `float` | `300.0` | Key ban duration in seconds |
+| `reach_limit_exception` | `str` | `None` | Dotted path to exception class |
+| `rotation_strategy` | `str` | `"random"` | Key rotation strategy |
+
+### Sync Example
+
+```python
+from apipool import DynamicKeyManager, get_keys, get_config, login
+
+tokens = login("http://localhost:8000", "alice", "password")
+
+manager = DynamicKeyManager(
+    key_fetcher=lambda: get_keys(
+        service_url="http://localhost:8000",
+        client_type="coingecko",
+        auth_token=tokens["access_token"],
+    ),
+    api_key_factory=lambda raw_key: CoinGeckoApiKey(raw_key),
+    config_fetcher=lambda: get_config(
+        service_url="http://localhost:8000",
+        pool_identifier="my-pool",
+        auth_token=tokens["access_token"],
+    ),
+    refresh_interval=120,
+)
+
+# Config is auto-synced. Access it anytime:
+print(f"Concurrency: {manager.config.concurrency}")
+print(f"Timeout: {manager.config.timeout}")
+```
+
+### Manual Config Fetch
+
+```python
+from apipool import get_config, aget_config
+
+# Sync
+config = get_config("http://localhost:8000", "my-pool", tokens["access_token"])
+manager.apply_config(config)
+
+# Async
+config = await aget_config("http://localhost:8000", "my-pool", tokens["access_token"])
+```
+
+## Concurrent Execution
+
+Execute the same method across multiple argument sets with bounded concurrency:
+
+### Sync: `call_concurrent`
+
+```python
+# Execute 100 API calls with max 10 concurrent
+results = manager.call_concurrent(
+    method_name="some_api_method",
+    args_list=[(arg1,), (arg2,), (arg3,)],
+    kwargs_list=[{"key": "a"}, {"key": "b"}, {"key": "c"}],
+    max_concurrency=10,   # overrides config.concurrency
+    timeout=15.0,         # overrides config.timeout
+)
+```
+
+### Async: `acall_concurrent`
+
+```python
+results = await manager.acall_concurrent(
+    method_name="coins.simple.price.get",
+    args_list=[(), (), ()],
+    kwargs_list=[
+        {"ids": "bitcoin"},
+        {"ids": "ethereum"},
+        {"ids": "solana"},
+    ],
+    max_concurrency=5,
+    timeout=10.0,
+)
+```
+
+Concurrency and timeout default to `manager.config` values when not specified.
+
+## Batch Execution
+
+`batch_exec` and `abatch_exec` are designed for **high-volume workloads**
+such as fetching 10 000 token prices from CoinGecko.  Key features:
+
+- **Deduplication** — each `item_id` is guaranteed to execute at most once.
+- **Retry with rotation** — when an API call fails, the item is retried on a
+  *different* key, honouring the key rotation strategy.
+- **Temporary banning** — keys that accumulate `ban_threshold` consecutive
+  failures are temporarily excluded from the batch group for `ban_duration`
+  seconds, then automatically re-admitted.
+- **Server-configurable** — all tuning parameters can be set centrally in
+  `pool_config` on the server and synced to clients via `PoolConfig`.
+
+### Sync: `batch_exec`
+
+```python
+from apipool import ApiKeyManager, BatchResult
+
+manager = ApiKeyManager(apikey_list=apikeys)
+
+# Each item is (item_id, args_tuple, kwargs_dict)
+items = [
+    ("bitcoin",  (), {"ids": "bitcoin",  "vs_currencies": "usd"}),
+    ("ethereum", (), {"ids": "ethereum", "vs_currencies": "usd"}),
+    # ... up to 10 000 items
+]
+
+result: BatchResult = manager.batch_exec(
+    method_name="coins.simple.price.get",
+    items=items,
+    max_concurrency=20,    # 20 parallel calls
+    timeout=10.0,          # per-call timeout
+    retry_on_failure=True, # retry on another key
+    max_retries=3,         # up to 3 retries per item
+    ban_threshold=3,       # ban key after 3 consecutive failures
+    ban_duration=300.0,    # ban for 5 minutes
+)
+
+print(f"Success: {result.succeeded}/{result.total} ({result.success_rate:.1%})")
+print(f"Failed items: {list(result.errors.keys())}")
+print(f"Banned keys: {list(result.banned_keys.keys())}")
+
+# Access individual results
+btc_price = result.results["bitcoin"]
+```
+
+### Async: `abatch_exec`
+
+```python
+result: BatchResult = await manager.abatch_exec(
+    method_name="coins.simple.price.get",
+    items=items,
+    max_concurrency=50,
+    retry_on_failure=True,
+    max_retries=3,
+)
+```
+
+### BatchResult
+
+| Field | Type | Description |
+|---|---|---|
+| `total` | `int` | Total items submitted |
+| `succeeded` | `int` | Items that completed successfully |
+| `failed` | `int` | Items that failed after all retries |
+| `results` | `dict` | `item_id → result` for successful items |
+| `errors` | `dict` | `item_id → Exception` for failed items |
+| `banned_keys` | `dict` | `primary_key → ban_expiry_timestamp` |
+| `elapsed` | `float` | Wall-clock seconds for the batch |
+| `success_rate` | `float` | Property: `succeeded / total` |
+
+### How It Works
+
+| Step | Description |
+|---|---|
+| 1. Deduplicate | Each `item_id` is unique — no item is executed twice |
+| 2. Dispatch | Items are dispatched to `ThreadPoolExecutor` (sync) or `asyncio.Semaphore` (async) |
+| 3. Execute | Each call goes through the normal key selection → ChainProxy → stats pipeline |
+| 4. Fail → Retry | On failure, the item is retried on a *different* key (up to `max_retries`) |
+| 5. Ban | Keys hitting `ban_threshold` consecutive failures are banned for `ban_duration` |
+| 6. Collect | Successful results and final errors are collected into `BatchResult` |
+
+### Batch Config Fields
+
+These `PoolConfig` fields control batch behaviour from the server:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `batch_retry_on_failure` | `bool \| None` | `None` (→ `retry_on_failure`) | Retry failed items on another key |
+| `batch_max_retries` | `int \| None` | `None` (→ `max_retries`) | Max retries per item in batch |
+| `ban_threshold` | `int` | `3` | Consecutive failures before banning a key |
+| `ban_duration` | `float` | `300.0` | Seconds a banned key is excluded |
 
 ## ApiKey Abstract Class
 
@@ -286,6 +483,7 @@ from apipool import (
     ApiKey,
     ApiKeyManager,
     PoolExhaustedError,
+    BatchResult,
 
     # Async chain proxy
     AsyncDummyClient,
@@ -300,15 +498,20 @@ from apipool import (
     StatusCollection,
     StatsCollector,
 
+    # Configuration
+    PoolConfig,
+
     # Server SDK mode — sync
     connect,
     login,
     get_keys,
+    get_config,
 
     # Server SDK mode — async
     async_connect,
     alogin,
     aget_keys,
+    aget_config,
 )
 ```
 

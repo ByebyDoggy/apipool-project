@@ -16,8 +16,8 @@
             {{ row.is_active ? '启用' : '停用' }}
           </t-tag>
         </template>
-        <template #keys_info="{ row }">
-          <span>{{ row.active_keys }} / {{ row.total_keys }}</span>
+        <template #member_count="{ row }">
+          <span>{{ row.member_count }}</span>
         </template>
         <template #op="{ row }">
           <t-space size="small">
@@ -49,21 +49,23 @@
     >
       <t-form ref="formRef" :data="formData" :rules="formRules" label-width="100px">
         <t-form-item label="标识符" name="identifier" v-if="!editingPool">
-          <t-input v-model="formData.identifier" placeholder="唯一标识符，如 my-openai-pool" />
+          <t-input v-model="formData.identifier" placeholder="唯一标识符，如 my-pool-1" />
         </t-form-item>
         <t-form-item label="名称" name="name">
           <t-input v-model="formData.name" placeholder="池名称" />
         </t-form-item>
-        <t-form-item label="服务类型" name="client_type" v-if="!editingPool">
-          <t-select v-model="formData.client_type" creatable filterable placeholder="如 openai / anthropic / 自定义">
-            <t-option value="generic" label="generic (通用 HTTP)" />
-            <t-option value="openai" label="openai" />
-            <t-option value="anthropic" label="anthropic" />
-            <t-option value="googlemaps" label="googlemaps" />
-          </t-select>
-        </t-form-item>
         <t-form-item label="描述" name="description">
           <t-textarea v-model="formData.description" placeholder="描述信息" :maxlength="200" />
+        </t-form-item>
+        <t-form-item label="限速异常类" name="reach_limit_exception" v-if="!editingPool">
+          <t-input v-model="formData.reach_limit_exception" placeholder="留空则任意异常都触发轮转（默认）" />
+        </t-form-item>
+        <t-form-item label="轮转策略" name="rotation_strategy" v-if="!editingPool">
+          <t-select v-model="formData.rotation_strategy" placeholder="Key 轮转策略">
+            <t-option value="random" label="随机 (random)" />
+            <t-option value="round_robin" label="轮询 (round_robin)" />
+            <t-option value="least_used" label="最少使用 (least_used)" />
+          </t-select>
         </t-form-item>
         <t-form-item label="选择 Key" name="key_identifiers" v-if="!editingPool">
           <t-select v-model="formData.key_identifiers" multiple placeholder="选择要加入池的 Key">
@@ -96,28 +98,28 @@ const editingPool = ref<PoolResponse | null>(null)
 const formData = ref<{
   identifier: string
   name: string
-  client_type: string
   description: string
+  reach_limit_exception: string
+  rotation_strategy: string
   key_identifiers: string[]
 }>({
   identifier: '',
   name: '',
-  client_type: 'generic',
   description: '',
+  reach_limit_exception: '',
+  rotation_strategy: 'random',
   key_identifiers: [],
 })
 
 const formRules = {
   identifier: [{ required: true, message: '请输入标识符' }],
   name: [{ required: true, message: '请输入名称' }],
-  client_type: [{ required: true, message: '请输入服务类型' }],
 }
 
 const columns = [
   { colKey: 'identifier', title: '标识符', width: 180, ellipsis: true },
   { colKey: 'name', title: '名称', width: 160 },
-  { colKey: 'client_type', title: '服务类型', width: 120 },
-  { colKey: 'keys_info', title: 'Key (活跃/总数)', width: 140, cell: 'keys_info' },
+  { colKey: 'member_count', title: '成员数', width: 100, cell: 'member_count' },
   { colKey: 'is_active', title: '状态', width: 80, cell: 'is_active' },
   { colKey: 'updated_at', title: '更新时间', width: 170 },
   { colKey: 'op', title: '操作', width: 160, cell: 'op' },
@@ -157,8 +159,9 @@ function onEdit(row: PoolResponse) {
   formData.value = {
     identifier: row.identifier,
     name: row.name,
-    client_type: row.client_type,
     description: row.description || '',
+    reach_limit_exception: row.reach_limit_exception || '',
+    rotation_strategy: row.rotation_strategy || 'random',
     key_identifiers: [],
   }
   showDialog.value = true
@@ -189,6 +192,8 @@ async function onSubmit() {
       const data: PoolUpdate = {
         name: formData.value.name || undefined,
         description: formData.value.description || undefined,
+        reach_limit_exception: formData.value.reach_limit_exception || undefined,
+        rotation_strategy: formData.value.rotation_strategy || undefined,
       }
       await updatePool(editingPool.value.identifier, data)
       MessagePlugin.success('更新成功')
@@ -196,9 +201,11 @@ async function onSubmit() {
       const data: PoolCreate = {
         identifier: formData.value.identifier,
         name: formData.value.name,
-        client_type: formData.value.client_type,
+        client_type: 'generic',
         description: formData.value.description || undefined,
-        key_identifiers: formData.value.key_identifiers,
+        reach_limit_exception: formData.value.reach_limit_exception || undefined,
+        rotation_strategy: formData.value.rotation_strategy || undefined,
+        key_identifiers: formData.value.key_identifiers.length > 0 ? formData.value.key_identifiers : undefined,
       }
       await createPool(data)
       MessagePlugin.success('创建成功')
@@ -218,8 +225,9 @@ function resetForm() {
   formData.value = {
     identifier: '',
     name: '',
-    client_type: 'generic',
     description: '',
+    reach_limit_exception: '',
+    rotation_strategy: 'random',
     key_identifiers: [],
   }
 }

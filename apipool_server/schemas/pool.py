@@ -12,9 +12,10 @@ class PoolCreateRequest(BaseModel):
     identifier: str = Field(..., min_length=3, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
-    client_type: str = Field(..., min_length=1, max_length=128)
+    client_type: str = "generic"
     reach_limit_exception: str | None = None
     rotation_strategy: str = "random"
+    pool_config: dict | None = None
     key_identifiers: list[str] | None = None
 
 
@@ -23,6 +24,7 @@ class PoolUpdateRequest(BaseModel):
     description: str | None = None
     reach_limit_exception: str | None = None
     rotation_strategy: str | None = None
+    pool_config: dict | None = None
 
 
 class PoolAddMembersRequest(BaseModel):
@@ -49,6 +51,7 @@ class PoolResponse(BaseModel):
     client_type: str
     reach_limit_exception: str | None = None
     rotation_strategy: str
+    pool_config: dict | None = None
     is_active: bool
     member_count: int = 0
     members: list[PoolMemberResponse] | None = None
@@ -56,6 +59,15 @@ class PoolResponse(BaseModel):
     updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class PoolConfigResponse(BaseModel):
+    """Dedicated response for pool configuration sync."""
+    pool_identifier: str
+    client_type: str
+    reach_limit_exception: str | None = None
+    rotation_strategy: str
+    pool_config: dict | None = None
 
 
 class ProxyInvokeRequest(BaseModel):
