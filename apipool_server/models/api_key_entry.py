@@ -22,8 +22,7 @@ class ApiKeyEntry(Base):
     # Encrypted key data
     encrypted_key = Column(Text, nullable=False)
 
-    # Client configuration
-    client_type = Column(String(128), nullable=False)
+    # Client configuration (service type is determined by pool membership, not here)
     client_config = Column(JSON, nullable=True)
 
     # Status

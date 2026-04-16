@@ -9,10 +9,9 @@ from typing import Any
 
 
 class ApiKeyCreateRequest(BaseModel):
-    identifier: str = Field(..., min_length=3, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    identifier: str = Field(..., min_length=1, max_length=128)
     alias: str | None = None
     raw_key: str = Field(..., min_length=1, max_length=4096)
-    client_type: str = Field(..., min_length=1, max_length=128)
     client_config: dict[str, Any] | None = None
     tags: list[str] | None = None
     description: str | None = None
@@ -33,7 +32,6 @@ class ApiKeyResponse(BaseModel):
     id: int
     identifier: str
     alias: str | None = None
-    client_type: str
     client_config: dict[str, Any] | None = None
     is_active: bool
     is_archived: bool
@@ -68,7 +66,6 @@ class RawKeyItem(BaseModel):
     """A single raw (decrypted) key with its metadata."""
     identifier: str
     raw_key: str
-    client_type: str
     alias: str | None = None
     tags: list[str] | None = None
 
@@ -78,3 +75,15 @@ class RawKeyListResponse(BaseModel):
     client_type: str
     keys: list[RawKeyItem]
     total: int
+
+
+class SingleRawKeyResponse(BaseModel):
+    """Response containing a single decrypted raw key for frontend display."""
+    id: int
+    identifier: str
+    raw_key: str
+    alias: str | None = None
+    is_active: bool
+    verification_status: str
+    tags: list[str] | None = None
+    created_at: datetime | None = None

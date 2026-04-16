@@ -1,0 +1,18 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - heading "ApiPool" [level=1] [ref=e6]
+    - paragraph [ref=e7]: API Key 管理平台
+  - generic [ref=e8]:
+    - generic [ref=e13]:
+      - generic [ref=e17] [cursor=pointer]: 登录
+      - generic [ref=e20] [cursor=pointer]: 注册
+    - generic [ref=e23]:
+      - generic [ref=e28]:
+        - generic [ref=e29]: user
+        - textbox "用户名" [ref=e30]
+      - generic [ref=e35]:
+        - generic [ref=e36]: lock-on
+        - textbox "密码" [ref=e37]
+        - img [ref=e39] [cursor=pointer]
+      - button "登 录" [ref=e46] [cursor=pointer]:
+        - generic [ref=e47]: 登 录

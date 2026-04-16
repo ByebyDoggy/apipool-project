@@ -1,0 +1,233 @@
+- generic [ref=e53]:
+  - complementary [ref=e54]:
+    - generic [ref=e56] [cursor=pointer]: ApiPool
+    - list [ref=e59]:
+      - listitem [ref=e60] [cursor=pointer]:
+        - img [ref=e61]
+        - generic [ref=e63]: 概览
+      - listitem [ref=e64] [cursor=pointer]:
+        - img [ref=e65]
+        - generic [ref=e67]: Key 管理
+      - listitem [ref=e68] [cursor=pointer]:
+        - img [ref=e69]
+        - generic [ref=e71]: 密钥池
+  - generic [ref=e72]:
+    - generic [ref=e73]:
+      - generic [ref=e75]:
+        - generic [ref=e76]:
+          - generic [ref=e79]: ApiPool
+          - img [ref=e81]
+        - generic [ref=e87]: Key 管理
+      - button "user1" [ref=e89] [cursor=pointer]:
+        - generic [ref=e90]:
+          - img [ref=e91]
+          - text: user1
+    - main [ref=e93]:
+      - generic [ref=e210]:
+        - generic [ref=e211]:
+          - generic [ref=e213]:
+            - generic [ref=e214]: API Key 管理
+            - generic [ref=e215]:
+              - generic [ref=e220]:
+                - textbox "类型筛选" [ref=e221]
+                - img [ref=e223]
+              - button "新增 Key" [ref=e226] [cursor=pointer]:
+                - generic [ref=e227]:
+                  - img [ref=e228]
+                  - text: 新增 Key
+          - generic [ref=e230]:
+            - table [ref=e233]:
+              - rowgroup [ref=e243]:
+                - row "标识符 别名 服务类型 标签 状态 验证状态 更新时间 操作" [ref=e244]:
+                  - columnheader "标识符" [ref=e245]:
+                    - generic [ref=e247]: 标识符
+                  - columnheader "别名" [ref=e248]:
+                    - generic [ref=e250]: 别名
+                  - columnheader "服务类型" [ref=e251]:
+                    - generic [ref=e252]: 服务类型
+                  - columnheader "标签" [ref=e253]:
+                    - generic [ref=e254]: 标签
+                  - columnheader "状态" [ref=e255]:
+                    - generic [ref=e256]: 状态
+                  - columnheader "验证状态" [ref=e257]:
+                    - generic [ref=e258]: 验证状态
+                  - columnheader "更新时间" [ref=e259]:
+                    - generic [ref=e260]: 更新时间
+                  - columnheader "操作" [ref=e261]:
+                    - generic [ref=e262]: 操作
+              - rowgroup [ref=e263]:
+                - row "moralis-yr1933 启用 失败 2026-04-16T15:50:14 验证 编辑 删除" [ref=e264]:
+                  - cell "moralis-yr1933" [ref=e265]:
+                    - generic [ref=e266]: moralis-yr1933
+                  - cell [ref=e267]
+                  - cell [ref=e268]
+                  - cell [ref=e269]
+                  - cell "启用" [ref=e270]:
+                    - generic [ref=e272]: 启用
+                  - cell "失败" [ref=e273]:
+                    - generic [ref=e275]: 失败
+                  - cell "2026-04-16T15:50:14" [ref=e276]
+                  - cell "验证 编辑 删除" [ref=e277]:
+                    - generic [ref=e278]:
+                      - generic [ref=e280] [cursor=pointer]: 验证
+                      - generic [ref=e282] [cursor=pointer]: 编辑
+                      - generic [ref=e284] [cursor=pointer]: 删除
+                - row "coingecko-molanlan 启用 失败 2026-04-11T10:08:28 验证 编辑 删除" [ref=e285]:
+                  - cell "coingecko-molanlan" [ref=e286]:
+                    - generic [ref=e287]: coingecko-molanlan
+                  - cell [ref=e288]
+                  - cell [ref=e289]
+                  - cell [ref=e290]
+                  - cell "启用" [ref=e291]:
+                    - generic [ref=e293]: 启用
+                  - cell "失败" [ref=e294]:
+                    - generic [ref=e296]: 失败
+                  - cell "2026-04-11T10:08:28" [ref=e297]
+                  - cell "验证 编辑 删除" [ref=e298]:
+                    - generic [ref=e299]:
+                      - generic [ref=e301] [cursor=pointer]: 验证
+                      - generic [ref=e303] [cursor=pointer]: 编辑
+                      - generic [ref=e305] [cursor=pointer]: 删除
+                - row "coingecko-kernal 启用 失败 2026-04-11T10:06:11 验证 编辑 删除" [ref=e306]:
+                  - cell "coingecko-kernal" [ref=e307]:
+                    - generic [ref=e308]: coingecko-kernal
+                  - cell [ref=e309]
+                  - cell [ref=e310]
+                  - cell [ref=e311]
+                  - cell "启用" [ref=e312]:
+                    - generic [ref=e314]: 启用
+                  - cell "失败" [ref=e315]:
+                    - generic [ref=e317]: 失败
+                  - cell "2026-04-11T10:06:11" [ref=e318]
+                  - cell "验证 编辑 删除" [ref=e319]:
+                    - generic [ref=e320]:
+                      - generic [ref=e322] [cursor=pointer]: 验证
+                      - generic [ref=e324] [cursor=pointer]: 编辑
+                      - generic [ref=e326] [cursor=pointer]: 删除
+                - row "coingecko-quir483 启用 失败 2026-04-11T09:58:54 验证 编辑 删除" [ref=e327]:
+                  - cell "coingecko-quir483" [ref=e328]:
+                    - generic [ref=e329]: coingecko-quir483
+                  - cell [ref=e330]
+                  - cell [ref=e331]
+                  - cell [ref=e332]
+                  - cell "启用" [ref=e333]:
+                    - generic [ref=e335]: 启用
+                  - cell "失败" [ref=e336]:
+                    - generic [ref=e338]: 失败
+                  - cell "2026-04-11T09:58:54" [ref=e339]
+                  - cell "验证 编辑 删除" [ref=e340]:
+                    - generic [ref=e341]:
+                      - generic [ref=e343] [cursor=pointer]: 验证
+                      - generic [ref=e345] [cursor=pointer]: 编辑
+                      - generic [ref=e347] [cursor=pointer]: 删除
+                - row "coingecko-yr00001 启用 失败 2026-04-11T09:53:07 验证 编辑 删除" [ref=e348]:
+                  - cell "coingecko-yr00001" [ref=e349]:
+                    - generic [ref=e350]: coingecko-yr00001
+                  - cell [ref=e351]
+                  - cell [ref=e352]
+                  - cell [ref=e353]
+                  - cell "启用" [ref=e354]:
+                    - generic [ref=e356]: 启用
+                  - cell "失败" [ref=e357]:
+                    - generic [ref=e359]: 失败
+                  - cell "2026-04-11T09:53:07" [ref=e360]
+                  - cell "验证 编辑 删除" [ref=e361]:
+                    - generic [ref=e362]:
+                      - generic [ref=e364] [cursor=pointer]: 验证
+                      - generic [ref=e366] [cursor=pointer]: 编辑
+                      - generic [ref=e368] [cursor=pointer]: 删除
+                - row "coingecko-1933 启用 失败 2026-04-11T09:47:57 验证 编辑 删除" [ref=e369]:
+                  - cell "coingecko-1933" [ref=e370]:
+                    - generic [ref=e371]: coingecko-1933
+                  - cell [ref=e372]
+                  - cell [ref=e373]
+                  - cell [ref=e374]
+                  - cell "启用" [ref=e375]:
+                    - generic [ref=e377]: 启用
+                  - cell "失败" [ref=e378]:
+                    - generic [ref=e380]: 失败
+                  - cell "2026-04-11T09:47:57" [ref=e381]
+                  - cell "验证 编辑 删除" [ref=e382]:
+                    - generic [ref=e383]:
+                      - generic [ref=e385] [cursor=pointer]: 验证
+                      - generic [ref=e387] [cursor=pointer]: 编辑
+                      - generic [ref=e389] [cursor=pointer]: 删除
+                - row "ethrpc4 启用 失败 2026-04-11T07:05:16 验证 编辑 删除" [ref=e390]:
+                  - cell "ethrpc4" [ref=e391]:
+                    - generic [ref=e392]: ethrpc4
+                  - cell [ref=e393]
+                  - cell [ref=e394]
+                  - cell [ref=e395]
+                  - cell "启用" [ref=e396]:
+                    - generic [ref=e398]: 启用
+                  - cell "失败" [ref=e399]:
+                    - generic [ref=e401]: 失败
+                  - cell "2026-04-11T07:05:16" [ref=e402]
+                  - cell "验证 编辑 删除" [ref=e403]:
+                    - generic [ref=e404]:
+                      - generic [ref=e406] [cursor=pointer]: 验证
+                      - generic [ref=e408] [cursor=pointer]: 编辑
+                      - generic [ref=e410] [cursor=pointer]: 删除
+                - row "ethrpc3 启用 失败 2026-04-11T07:04:37 验证 编辑 删除" [ref=e411]:
+                  - cell "ethrpc3" [ref=e412]:
+                    - generic [ref=e413]: ethrpc3
+                  - cell [ref=e414]
+                  - cell [ref=e415]
+                  - cell [ref=e416]
+                  - cell "启用" [ref=e417]:
+                    - generic [ref=e419]: 启用
+                  - cell "失败" [ref=e420]:
+                    - generic [ref=e422]: 失败
+                  - cell "2026-04-11T07:04:37" [ref=e423]
+                  - cell "验证 编辑 删除" [ref=e424]:
+                    - generic [ref=e425]:
+                      - generic [ref=e427] [cursor=pointer]: 验证
+                      - generic [ref=e429] [cursor=pointer]: 编辑
+                      - generic [ref=e431] [cursor=pointer]: 删除
+                - row "ethrpc2 启用 失败 2026-04-11T06:09:17 验证 编辑 删除" [ref=e432]:
+                  - cell "ethrpc2" [ref=e433]:
+                    - generic [ref=e434]: ethrpc2
+                  - cell [ref=e435]
+                  - cell [ref=e436]
+                  - cell [ref=e437]
+                  - cell "启用" [ref=e438]:
+                    - generic [ref=e440]: 启用
+                  - cell "失败" [ref=e441]:
+                    - generic [ref=e443]: 失败
+                  - cell "2026-04-11T06:09:17" [ref=e444]
+                  - cell "验证 编辑 删除" [ref=e445]:
+                    - generic [ref=e446]:
+                      - generic [ref=e448] [cursor=pointer]: 验证
+                      - generic [ref=e450] [cursor=pointer]: 编辑
+                      - generic [ref=e452] [cursor=pointer]: 删除
+                - row "ethrpc1 启用 失败 2026-04-11T06:08:54 验证 编辑 删除" [ref=e453]:
+                  - cell "ethrpc1" [ref=e454]:
+                    - generic [ref=e455]: ethrpc1
+                  - cell [ref=e456]
+                  - cell [ref=e457]
+                  - cell [ref=e458]
+                  - cell "启用" [ref=e459]:
+                    - generic [ref=e461]: 启用
+                  - cell "失败" [ref=e462]:
+                    - generic [ref=e464]: 失败
+                  - cell "2026-04-11T06:08:54" [ref=e465]
+                  - cell "验证 编辑 删除" [ref=e466]:
+                    - generic [ref=e467]:
+                      - generic [ref=e469] [cursor=pointer]: 验证
+                      - generic [ref=e471] [cursor=pointer]: 编辑
+                      - generic [ref=e473] [cursor=pointer]: 删除
+            - generic [ref=e475]:
+              - generic [ref=e476]: 共 10 条数据
+              - generic [ref=e480]:
+                - textbox "请选择" [ref=e481] [cursor=pointer]: 20 条/页
+                - img [ref=e483]
+              - img [ref=e486]
+              - list [ref=e489]:
+                - listitem [ref=e490] [cursor=pointer]: "1"
+              - img [ref=e492]
+              - generic [ref=e495]:
+                - text: 跳至
+                - generic [ref=e496]:
+                  - textbox [ref=e500]: "1"
+                  - generic [ref=e502]: / 1 页
+        - text: "* * *"

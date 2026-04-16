@@ -12,7 +12,7 @@ from ...models.user import User
 from ...schemas.api_key import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, ApiKeyRotateRequest,
     ApiKeyResponse, ApiKeyVerifyResponse, BatchImportRequest, BatchImportResponse,
-    RawKeyListResponse,
+    RawKeyListResponse, SingleRawKeyResponse,
 )
 from ...schemas.common import PageResponse
 from ...services.key_service import KeyService
@@ -30,7 +30,7 @@ def create_key(req: ApiKeyCreateRequest, user: User = Depends(get_current_user),
 
 @router.get("", response_model=PageResponse[ApiKeyResponse])
 def list_keys(
-    client_type: Optional[str] = Query(None),
+    pool_id: Optional[int] = Query(None, description="Filter by pool membership (pool ID)"),
     is_active: Optional[bool] = Query(None),
     tag: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -40,23 +40,24 @@ def list_keys(
 ):
     """List all API Keys for the current user."""
     service = KeyService(db)
-    items, total = service.list_keys(user, client_type, is_active, tag, page, page_size)
+    items, total = service.list_keys(user, pool_id, is_active, tag, page, page_size)
     return PageResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/raw", response_model=RawKeyListResponse)
 def get_raw_keys(
-    client_type: str = Query(..., min_length=1, description="Client type to filter keys by"),
+    pool_identifier: str = Query(..., min_length=1, description="Pool identifier to fetch keys for"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get decrypted raw keys for a given client_type.
+    """Get decrypted raw keys belonging to a specific pool.
 
     Designed for SDK usage: retrieve raw keys to construct local
-    SDK clients (e.g. CoinGeckoClient) with key rotation.
+    SDK clients with key rotation. Keys are resolved via pool_members
+    association table.
     """
     service = KeyService(db)
-    return service.get_raw_keys(user, client_type)
+    return service.get_raw_keys(user, pool_identifier)
 
 
 @router.get("/{identifier}", response_model=ApiKeyResponse)
@@ -64,6 +65,13 @@ def get_key(identifier: str, user: User = Depends(get_current_user), db: Session
     """Get details of a specific API Key."""
     service = KeyService(db)
     return service.get(user, identifier)
+
+
+@router.get("/{identifier}/raw", response_model=SingleRawKeyResponse)
+def get_raw_key(identifier: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get decrypted raw key value for a specific key (for frontend display)."""
+    service = KeyService(db)
+    return service.get_raw_key(user, identifier)
 
 
 @router.put("/{identifier}", response_model=ApiKeyResponse)

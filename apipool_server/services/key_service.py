@@ -10,12 +10,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from ..models.api_key_entry import ApiKeyEntry
+from ..models.key_pool import PoolMember, KeyPool
 from ..models.user import User
 from ..security import KeyEncryption
 from ..schemas.api_key import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, ApiKeyRotateRequest,
     ApiKeyResponse, ApiKeyVerifyResponse, BatchImportRequest, BatchImportResponse,
-    RawKeyItem, RawKeyListResponse,
+    RawKeyItem, RawKeyListResponse, SingleRawKeyResponse,
 )
 
 
@@ -39,7 +40,6 @@ class KeyService:
             identifier=req.identifier,
             alias=req.alias,
             encrypted_key=encrypted_key,
-            client_type=req.client_type,
             client_config=req.client_config,
             tags=req.tags,
             description=req.description,
@@ -51,7 +51,8 @@ class KeyService:
         return ApiKeyResponse.model_validate(entry)
 
     def list_keys(
-        self, user: User, client_type: Optional[str] = None,
+        self, user: User,
+        pool_id: Optional[int] = None,  # changed: filter by pool membership instead of client_type
         is_active: Optional[bool] = None, tag: Optional[str] = None,
         page: int = 1, page_size: int = 20,
     ) -> tuple[list[ApiKeyResponse], int]:
@@ -59,12 +60,15 @@ class KeyService:
             and_(ApiKeyEntry.user_id == user.id, ApiKeyEntry.is_archived == False)
         )
 
-        if client_type:
-            query = query.filter(ApiKeyEntry.client_type == client_type)
+        if pool_id:
+            # Filter by pool membership via pool_members
+            key_ids = self.db.query(PoolMember.key_id).filter(
+                PoolMember.pool_id == pool_id
+            ).subquery()
+            query = query.filter(ApiKeyEntry.id.in_(key_ids))
         if is_active is not None:
             query = query.filter(ApiKeyEntry.is_active == is_active)
         if tag:
-            # JSON contains check (SQLite/PostgreSQL compatible)
             query = query.filter(ApiKeyEntry.tags.contains([tag]))
 
         total = query.count()
@@ -72,22 +76,41 @@ class KeyService:
 
         return [ApiKeyResponse.model_validate(item) for item in items], total
 
-    def get_raw_keys(self, user: User, client_type: str) -> RawKeyListResponse:
-        """Get decrypted raw keys for a given client_type.
+    def get_raw_keys(self, user: User, pool_identifier: str) -> RawKeyListResponse:
+        """Get decrypted raw keys for a given pool.
 
-        This endpoint is designed for SDK usage: users can retrieve
-        their raw keys to construct local SDK clients with key rotation.
+        Keys are resolved through pool_members association table.
+        The service type (client_type) lives on the pool, not on individual keys.
         """
-        query = self.db.query(ApiKeyEntry).filter(
+        # Find the pool by identifier
+        pool = self.db.query(KeyPool).filter(
+            and_(KeyPool.identifier == pool_identifier, KeyPool.user_id == user.id)
+        ).first()
+
+        if not pool:
+            raise HTTPException(status_code=404, detail=f"Pool '{pool_identifier}' not found")
+
+        # Get all active, non-archived key IDs belonging to this pool
+        member_rows = self.db.query(PoolMember.key_id).filter(
+            PoolMember.pool_id == pool.id
+        ).all()
+        key_ids = [row[0] for row in member_rows]
+
+        if not key_ids:
+            return RawKeyListResponse(
+                client_type=pool.client_type or "",
+                keys=[],
+                total=0,
+            )
+
+        entries = self.db.query(ApiKeyEntry).filter(
             and_(
+                ApiKeyEntry.id.in_(key_ids),
                 ApiKeyEntry.user_id == user.id,
-                ApiKeyEntry.client_type == client_type,
                 ApiKeyEntry.is_active == True,
                 ApiKeyEntry.is_archived == False,
             )
-        )
-
-        entries = query.order_by(ApiKeyEntry.created_at.desc()).all()
+        ).order_by(ApiKeyEntry.created_at.desc()).all()
 
         keys = []
         for entry in entries:
@@ -95,13 +118,12 @@ class KeyService:
             keys.append(RawKeyItem(
                 identifier=entry.identifier,
                 raw_key=raw_key,
-                client_type=entry.client_type,
                 alias=entry.alias,
                 tags=entry.tags,
             ))
 
         return RawKeyListResponse(
-            client_type=client_type,
+            client_type=pool.client_type or "",
             keys=keys,
             total=len(keys),
         )
@@ -109,6 +131,21 @@ class KeyService:
     def get(self, user: User, identifier: str) -> ApiKeyResponse:
         entry = self._get_entry(user, identifier)
         return ApiKeyResponse.model_validate(entry)
+
+    def get_raw_key(self, user: User, identifier: str) -> SingleRawKeyResponse:
+        """Get decrypted raw key for a single key entry (for frontend display)."""
+        entry = self._get_entry(user, identifier)
+        raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+        return SingleRawKeyResponse(
+            id=entry.id,
+            identifier=entry.identifier,
+            raw_key=raw_key,
+            alias=entry.alias,
+            is_active=entry.is_active,
+            verification_status=entry.verification_status,
+            tags=entry.tags,
+            created_at=entry.created_at,
+        )
 
     def update(self, user: User, identifier: str, req: ApiKeyUpdateRequest) -> ApiKeyResponse:
         entry = self._get_entry(user, identifier)
@@ -147,9 +184,10 @@ class KeyService:
         entry = self._get_entry(user, identifier)
 
         try:
-            # Decrypt and instantiate the ApiKey
             raw_key = KeyEncryption.decrypt(entry.encrypted_key)
-            key_class = ClientRegistry.get(entry.client_type)
+            # Use generic key class — service type comes from pool, not key
+            from .client_registry import ClientRegistry
+            key_class = ClientRegistry.get("generic")
             apikey = key_class(raw_key=raw_key, client_config=entry.client_config)
 
             is_usable = apikey.is_usable()
@@ -168,9 +206,6 @@ class KeyService:
         )
 
     def batch_import(self, user: User, req: BatchImportRequest) -> BatchImportResponse:
-        if not ClientRegistry.has(req.client_type):
-            raise HTTPException(status_code=400, detail=f"Unknown client_type: '{req.client_type}'")
-
         imported = 0
         for i, key_data in enumerate(req.keys):
             raw_key = key_data.get("raw_key", "")
@@ -190,7 +225,6 @@ class KeyService:
                 identifier=identifier,
                 alias=alias,
                 encrypted_key=encrypted_key,
-                client_type=req.client_type,
             )
             self.db.add(entry)
             imported += 1

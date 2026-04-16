@@ -34,12 +34,29 @@ class PoolService:
         self.db = db
 
     def create(self, user: User, req: PoolCreateRequest) -> PoolResponse:
-        # Check identifier uniqueness
-        if self.db.query(KeyPool).filter(KeyPool.identifier == req.identifier).first():
+        # Check identifier uniqueness among all pools
+        existing = self.db.query(KeyPool).filter(
+            KeyPool.identifier == req.identifier,
+            KeyPool.user_id == user.id,
+            KeyPool.is_active == True,
+        ).first()
+
+        if existing:
             raise HTTPException(
                 status_code=409,
                 detail=f"Pool identifier '{req.identifier}' already exists",
             )
+
+        # Check if an inactive pool exists (stale data) — hard-delete it first
+        stale = self.db.query(KeyPool).filter(
+            KeyPool.identifier == req.identifier,
+            KeyPool.user_id == user.id,
+            KeyPool.is_active == False,
+        ).first()
+        if stale:
+            self.db.query(PoolMember).filter(PoolMember.pool_id == stale.id).delete()
+            self.db.delete(stale)
+            self.db.flush()
 
         pool = KeyPool(
             user_id=user.id,
@@ -56,25 +73,7 @@ class PoolService:
 
         # Add members if specified
         if req.key_identifiers:
-            for key_id in req.key_identifiers:
-                key_entry = self.db.query(ApiKeyEntry).filter(
-                    and_(
-                        ApiKeyEntry.identifier == key_id,
-                        ApiKeyEntry.user_id == user.id,
-                        ApiKeyEntry.is_active == True,
-                        ApiKeyEntry.is_archived == False,
-                    )
-                ).first()
-                if not key_entry:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"API Key '{key_id}' not found or not available",
-                    )
-                member = PoolMember(
-                    pool_id=pool.id,
-                    key_id=key_entry.id,
-                )
-                self.db.add(member)
+            self._add_members_to_pool(pool, user, req.key_identifiers)
 
         self.db.commit()
         self.db.refresh(pool)
@@ -115,7 +114,7 @@ class PoolService:
 
     def delete(self, user: User, identifier: str) -> None:
         pool = self._get_pool(user, identifier)
-        # Remove all member associations first
+        # Remove pool-member associations only (do NOT delete the ApiKeyEntry rows)
         self.db.query(PoolMember).filter(PoolMember.pool_id == pool.id).delete()
         self.db.delete(pool)
         self.db.commit()
@@ -257,6 +256,28 @@ class PoolService:
             )
             .all()
         )
+
+    def _add_members_to_pool(self, pool: KeyPool, user: User, key_identifiers: list[str]) -> None:
+        """Add API Key entries as members of a pool."""
+        for key_id in key_identifiers:
+            key_entry = self.db.query(ApiKeyEntry).filter(
+                and_(
+                    ApiKeyEntry.identifier == key_id,
+                    ApiKeyEntry.user_id == user.id,
+                    ApiKeyEntry.is_active == True,
+                    ApiKeyEntry.is_archived == False,
+                )
+            ).first()
+            if not key_entry:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"API Key '{key_id}' not found or not available",
+                )
+            member = PoolMember(
+                pool_id=pool.id,
+                key_id=key_entry.id,
+            )
+            self.db.add(member)
 
     def _resolve_exception(self, exception_path: Optional[str]):
         """Dynamically import an exception class from its dotted path."""

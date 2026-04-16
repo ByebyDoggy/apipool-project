@@ -4,7 +4,6 @@ export interface ApiKeyCreate {
   identifier: string
   alias?: string
   raw_key: string
-  client_type: string
   client_config?: Record<string, any> | null
   tags?: string[] | null
   description?: string | null
@@ -25,7 +24,6 @@ export interface ApiKeyResponse {
   id: number
   identifier: string
   alias: string | null
-  client_type: string
   client_config: Record<string, any> | null
   is_active: boolean
   is_archived: boolean
@@ -64,7 +62,7 @@ export interface PageResponse<T> {
 export interface KeyListParams {
   page?: number
   page_size?: number
-  client_type?: string
+  pool_id?: number
   is_active?: boolean
   tag?: string
 }
@@ -95,6 +93,21 @@ export function verifyKey(identifier: string) {
 
 export function rotateKey(identifier: string, new_raw_key: string) {
   return http.patch<ApiKeyResponse>(`/keys/${identifier}/rotate`, { new_raw_key })
+}
+
+export interface SingleRawKeyResponse {
+  id: number
+  identifier: string
+  raw_key: string
+  alias: string | null
+  is_active: boolean
+  verification_status: string
+  tags: string[] | null
+  created_at: string | null
+}
+
+export function getRawKey(identifier: string) {
+  return http.get<SingleRawKeyResponse>(`/keys/${identifier}/raw`)
 }
 
 export function batchImport(data: BatchImportRequest) {

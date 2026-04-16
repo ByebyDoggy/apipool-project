@@ -9,7 +9,7 @@ from typing import Any
 
 
 class PoolCreateRequest(BaseModel):
-    identifier: str = Field(..., min_length=3, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")
+    identifier: str = Field(..., min_length=1, max_length=128)
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
     client_type: str = "generic"

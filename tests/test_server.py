@@ -7,6 +7,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,6 +56,27 @@ db.commit()
 db.close()
 
 client = TestClient(app)
+
+
+@pytest.fixture(scope="module")
+def token():
+    """Login and return access_token for authenticated endpoints."""
+    # Register (may already exist if test_auth_flow ran first)
+    resp = client.post("/api/v1/auth/register", json={
+        "username": "alice",
+        "email": "alice@example.com",
+        "password": "Str0ngP@ss1",
+    })
+    assert resp.status_code in (201, 409)
+
+    # Login
+    resp = client.post("/api/v1/auth/login", json={
+        "username": "alice",
+        "password": "Str0ngP@ss1",
+    })
+    assert resp.status_code == 200
+    tokens = resp.json()
+    return tokens["access_token"]
 
 
 def test_health():

@@ -280,6 +280,10 @@ class ApiKeyManager(object):
 
         The ``concurrency``, ``timeout``, ``rate_limit`` etc. are consumed
         by :meth:`call_concurrent` and :meth:`acall_concurrent`.
+
+        .. note::
+            Callers should hold ``self._lock`` when invoking this method,
+            to prevent read-write races with :meth:`acall_concurrent`.
         """
         self._config = config
 
@@ -895,6 +899,9 @@ def _dummy_context():
 class AsyncApiCaller(object):
     """Async version of ApiCaller — awaits coroutine results and records stats."""
 
+    # 可配置的最大 null 结果重试次数（0=不重试，兼容旧行为）
+    _max_null_retries: int = 3
+
     def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc):
         self.apikey = apikey
         self.apikey_manager = apikey_manager
@@ -902,26 +909,84 @@ class AsyncApiCaller(object):
         self.reach_limit_exc = reach_limit_exc
 
     async def __call__(self, *args, **kwargs):
-        try:
-            res = self.call_method(*args, **kwargs)
-            # If the resolved method is a coroutine, await it
-            if inspect.isawaitable(res):
-                res = await res
-            self.apikey_manager.stats.add_event(
-                self.apikey.primary_key, StatusCollection.c1_Success.id,
-            )
-            return res
-        except self.reach_limit_exc as e:
-            self.apikey_manager.remove_one(self.apikey.primary_key)
-            self.apikey_manager.stats.add_event(
-                self.apikey.primary_key, StatusCollection.c9_ReachLimit.id,
-            )
-            raise e
-        except Exception as e:
-            self.apikey_manager.stats.add_event(
-                self.apikey.primary_key, StatusCollection.c5_Failed.id,
-            )
-            raise e
+        # ── Null 结果自动重试机制 ──
+        # 当 RPC 返回 None / null / 空结果时，视为"软失败"，自动尝试其他节点。
+        # 这解决了 eth_getTransactionReceipt 在某些节点上返回 HTTP 200 + null body 的问题。
+        tried_keys = set()
+        tried_keys.add(self.apikey.primary_key)
+        last_exc = None
+
+        for attempt in range(self._max_null_retries + 1):
+            try:
+                res = self.call_method(*args, **kwargs)
+                # If the resolved method is a coroutine, await it
+                if inspect.isawaitable(res):
+                    res = await res
+
+                # 判断是否为 null/空结果（需要实际数据的 RPC 调用不应返回 None）
+                if res is not None and res is not False and res != '':
+                    self.apikey_manager.stats.add_event(
+                        self.apikey.primary_key, StatusCollection.c1_Success.id,
+                    )
+                    return res
+
+                # ── Null 结果 → 记录并尝试下一个 key ──
+                last_exc = f'Null result on attempt {attempt + 1}'
+                logger.debug(
+                    '[AsyncApiCaller] Null result for %s (attempt %d/%d), trying next key...',
+                    getattr(self.call_method, '__name__', str(self.call_method)),
+                    attempt + 1,
+                    self._max_null_retries + 1,
+                )
+                self.apikey_manager.stats.add_event(
+                    self.apikey.primary_key, StatusCollection.c5_Failed.id,
+                )
+
+            except self.reach_limit_exc as e:
+                self.apikey_manager.remove_one(self.apikey.primary_key)
+                self.apikey_manager.stats.add_event(
+                    self.apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+                )
+                raise e
+            except Exception as e:
+                self.apikey_manager.stats.add_event(
+                    self.apikey.primary_key, StatusCollection.c5_Failed.id,
+                )
+                raise e
+
+            # 选择一个不同的 key 重试
+            next_apikey = self._pick_different_key(tried_keys)
+            if next_apikey is None:
+                break  # 所有 key 都试过了
+            tried_keys.add(next_apikey.primary_key)
+
+            # 重建调用链：用新的 apikey 的 client 替换当前方法
+            real_client = next_apikey._client
+            target = real_client
+            for attr in getattr(self.call_method, '_attr_path', []):
+                target = getattr(target, attr, None)
+            if callable(target):
+                self.call_method = target
+            self.apikey = next_apikey
+
+        # 所有可能的 key 都返回了 null
+        logger.warning(
+            '[AsyncApiCaller] All %d keys returned null for %s',
+            len(tried_keys),
+            getattr(self.call_method, '__name__', str(self.call_method)),
+        )
+        return None
+
+    def _pick_different_key(self, tried_keys: set):
+        """从 pool 中选择一个尚未尝试过的 key"""
+        available = [
+            k for k in list(self.apikey_manager.apikey_chain.values())
+            if k.primary_key not in tried_keys
+        ]
+        if available:
+            import random
+            return random.choice(available)
+        return None
 
 
 class AsyncChainProxy(object):
@@ -981,6 +1046,19 @@ class AsyncChainProxy(object):
                 "AsyncChainProxy: attribute path '{}' resolved to non-callable "
                 "{} of type {}".format(path_shown, repr(target), type(target).__name__)
             )
+
+        # Attach _attr_path for null-retry reconstruction
+        try:
+            target._attr_path = self._attr_path
+        except AttributeError:
+            pass
+
+        return await AsyncApiCaller(
+            apikey=apikey,
+            apikey_manager=self._manager,
+            call_method=target,
+            reach_limit_exc=self._reach_limit_exc,
+        )(*args, **kwargs)
 
         return await AsyncApiCaller(
             apikey=apikey,
@@ -1141,7 +1219,14 @@ class DynamicKeyManager(ApiKeyManager):
                 logger.exception("DynamicKeyManager: refresh failed")
 
     def _do_refresh(self):
-        """Fetch latest keys from server and reconcile with local pool."""
+        """Fetch latest keys from server and reconcile with local pool.
+
+        Uses a two-phase approach to minimize lock hold time:
+
+        Phase 1 (lock-free): Fetch raw keys from server, compute diff against a
+          quick snapshot of current state, then pre-create all new ApiKey objects.
+        Phase 2 (under lock): Atomic reconcile — restore, insert, remove.
+        """
         try:
             raw_keys = self._key_fetcher()
         except Exception:
@@ -1151,47 +1236,64 @@ class DynamicKeyManager(ApiKeyManager):
         if raw_keys is None:
             raw_keys = []
 
+        # Pre-create ALL ApiKey objects to obtain their real primary_key values.
+        # This ensures correct diff comparison even when get_primary_key() returns
+        # a value different from the raw key string (e.g. "CG_abc123" vs "sk_live_...").
+        _all_precreated = {}   # primary_key -> ApiKey
+        _create_failures = []
+        for raw_key in raw_keys:
+            try:
+                apikey = self._api_key_factory(raw_key)
+                apikey.connect_client()
+                _all_precreated[apikey.primary_key] = apikey
+            except Exception as e:
+                logger.warning(
+                    "DynamicKeyManager: failed to pre-create ApiKey for %r: %s",
+                    raw_key, e,
+                )
+                _create_failures.append(raw_key)
+
+        new_pk_set = set(_all_precreated.keys())
+
+        # Quick snapshot for diff computation (minimize lock hold time)
         with self._lock:
-            # Current key identifiers in the active pool
             current_keys = set(self.apikey_chain.keys())
-            # Also check archived keys — they can be restored
             archived_keys = set(self.archived_apikey_chain.keys())
 
-            new_key_set = set(raw_keys)
+        keys_to_add = new_pk_set - current_keys
+        keys_to_remove = current_keys - new_pk_set
+        keys_to_restore = keys_to_add & archived_keys
+        keys_to_create = keys_to_add - archived_keys
 
-            # Keys to add: in server but not in active pool
-            keys_to_add = new_key_set - current_keys
-            # Keys to remove: in active pool but not on server
-            keys_to_remove = current_keys - new_key_set
+        # Filter pre-created keys: only keep those that actually need to be added
+        # (exclude keys that already exist and don't need restore)
+        precreated_apikeys = [
+            (pk, apikey)
+            for pk, apikey in _all_precreated.items()
+            if pk in keys_to_create
+        ]
 
-            # Restore archived keys that reappear on the server
-            keys_to_restore = keys_to_add & archived_keys
-            # Truly new keys (never seen before)
-            keys_to_create = keys_to_add - archived_keys
+        added_identifiers = []
+        removed_identifiers = []
 
-            added_identifiers = []
-            removed_identifiers = []
+        # Atomic reconcile under lock (pure memory operations only)
+        with self._lock:
+            final_current = set(self.apikey_chain.keys())
+            final_archived = set(self.archived_apikey_chain.keys())
 
-            # Restore archived keys
-            for pk in keys_to_restore:
+            effective_restore = keys_to_restore & final_archived
+            for pk in effective_restore:
                 apikey = self.archived_apikey_chain.pop(pk)
                 self.apikey_chain[pk] = apikey
                 added_identifiers.append(pk)
 
-            # Create new keys from factory
-            for raw_key in keys_to_create:
-                try:
-                    apikey = self._api_key_factory(raw_key)
+            for pk, apikey in precreated_apikeys:
+                if pk not in self.apikey_chain:
                     self.add_one(apikey)
-                    added_identifiers.append(raw_key)
-                except Exception:
-                    logger.warning(
-                        "DynamicKeyManager: failed to create ApiKey for %r",
-                        raw_key, exc_info=True,
-                    )
+                    added_identifiers.append(pk)
 
-            # Remove keys that disappeared from server
-            for pk in keys_to_remove:
+            effective_remove = keys_to_remove & final_current
+            for pk in effective_remove:
                 try:
                     super().remove_one(pk)
                     removed_identifiers.append(pk)
@@ -1216,11 +1318,12 @@ class DynamicKeyManager(ApiKeyManager):
                 len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
             )
 
-        # Sync config from server
+        # Sync config from server (under lock for thread safety)
         if self._config_fetcher:
             try:
                 config = self._config_fetcher()
-                self.apply_config(config)
+                with self._lock:
+                    self.apply_config(config)
             except Exception:
                 logger.warning("DynamicKeyManager: config sync failed during refresh", exc_info=True)
 
@@ -1324,7 +1427,11 @@ class AsyncDynamicKeyManager(ApiKeyManager):
     # ── Async lifecycle ──────────────────────────────────────────────
 
     async def ainit(self):
-        """Perform the initial async key fetch.  Call this after construction."""
+        """Perform the initial async key fetch.  Call this after construction.
+
+        Uses the same two-phase approach as ``arefresh()``: pre-create all
+        ApiKey objects outside the lock, then atomically insert under the lock.
+        """
         try:
             raw_keys = self._key_fetcher()
             if inspect.isawaitable(raw_keys):
@@ -1333,24 +1440,32 @@ class AsyncDynamicKeyManager(ApiKeyManager):
             logger.warning("AsyncDynamicKeyManager: initial key fetch failed")
             raw_keys = []
 
-        with self._lock:
-            for raw_key in raw_keys:
-                try:
-                    apikey = self._api_key_factory(raw_key)
-                    self.add_one(apikey)
-                except Exception:
-                    logger.warning(
-                        "AsyncDynamicKeyManager: failed to create ApiKey for %r",
-                        raw_key, exc_info=True,
-                    )
+        # Pre-create all ApiKey objects outside the lock
+        precreated_apikeys = []
+        for raw_key in raw_keys:
+            try:
+                apikey = self._api_key_factory(raw_key)
+                await apikey.aconnect_client()
+                precreated_apikeys.append(apikey)
+            except Exception:
+                logger.warning(
+                    "AsyncDynamicKeyManager: failed to create ApiKey for %r",
+                    raw_key, exc_info=True,
+                )
 
-        # Initial config sync
+        # Atomic batch insert under lock
+        with self._lock:
+            for apikey in precreated_apikeys:
+                super().add_one(apikey)
+
+        # Initial config sync (outside lock)
         if self._config_fetcher:
             try:
                 config = self._config_fetcher()
                 if inspect.isawaitable(config):
                     config = await config
-                self.apply_config(config)
+                with self._lock:
+                    self.apply_config(config)
             except Exception:
                 logger.warning("AsyncDynamicKeyManager: initial config sync failed", exc_info=True)
 
@@ -1395,7 +1510,16 @@ class AsyncDynamicKeyManager(ApiKeyManager):
     # ── Async refresh logic ──────────────────────────────────────────
 
     async def arefresh(self):
-        """Manually trigger a key pool refresh (async)."""
+        """Manually trigger a key pool refresh (async).
+
+        Uses a two-phase approach to avoid holding locks during I/O:
+
+        Phase 1 (lock-free): Fetch raw keys from server, then pre-create all new
+          ApiKey objects (including ``aconnect_client()``) entirely outside the lock.
+        Phase 2 (atomic): Acquire the lock briefly to reconcile diffs and swap
+          the active chain — pure in-memory dict operations with zero awaits.
+        """
+        # ── Phase 1: Lock-free I/O ──────────────────────────────────────
         try:
             raw_keys = self._key_fetcher()
             if inspect.isawaitable(raw_keys):
@@ -1407,48 +1531,77 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         if raw_keys is None:
             raw_keys = []
 
+        # Pre-create ALL ApiKey objects to obtain their real primary_key values.
+        # This ensures correct diff comparison even when get_primary_key() returns
+        # a value different from the raw key string (e.g. "CG_abc123" vs "sk_live_...").
+        _all_precreated = {}   # primary_key -> ApiKey
+        _create_failures = []
+        for raw_key in raw_keys:
+            try:
+                apikey = self._api_key_factory(raw_key)
+                await apikey.aconnect_client()
+                _all_precreated[apikey.primary_key] = apikey
+            except Exception as e:
+                logger.warning(
+                    "AsyncDynamicKeyManager: failed to pre-create ApiKey for %r: %s",
+                    raw_key, e,
+                )
+                _create_failures.append(raw_key)
+
+        new_pk_set = set(_all_precreated.keys())
+
+        # Snapshot current state under the lock just long enough to compute diff
+        with self._lock:
+            current_keys = set(self.apikey_chain.keys())  # these are primary_keys
+            archived_keys = set(self.archived_apikey_chain.keys())
+
+        keys_to_add = new_pk_set - current_keys
+        keys_to_remove = current_keys - new_pk_set
+        keys_to_restore = keys_to_add & archived_keys
+        keys_to_create = keys_to_add - archived_keys
+
+        # Filter pre-created keys: only keep those that actually need to be added
+        # (exclude keys that already exist and don't need restore)
+        precreated_apikeys = {
+            pk: apikey
+            for pk, apikey in _all_precreated.items()
+            if pk in keys_to_create
+        }
+
         added_identifiers = []
         removed_identifiers = []
 
+        # ── Phase 2: Atomic swap under lock (pure memory, no awaits) ─────
         with self._lock:
-            current_keys = set(self.apikey_chain.keys())
-            archived_keys = set(self.archived_apikey_chain.keys())
-            new_key_set = set(raw_keys)
+            # Re-snapshot inside the lock — state may have changed since phase 1
+            final_current = set(self.apikey_chain.keys())
+            final_archived = set(self.archived_apikey_chain.keys())
 
-            keys_to_add = new_key_set - current_keys
-            keys_to_remove = current_keys - new_key_set
-            keys_to_restore = keys_to_add & archived_keys
-            keys_to_create = keys_to_add - archived_keys
-
-            # Restore archived keys
-            for pk in keys_to_restore:
+            # Only restore keys that are still in archived and still needed
+            effective_restore = keys_to_restore & final_archived
+            for pk in effective_restore:
                 apikey = self.archived_apikey_chain.pop(pk)
                 self.apikey_chain[pk] = apikey
                 added_identifiers.append(pk)
 
-            # Create new keys (async client connect)
-            for raw_key in keys_to_create:
-                try:
-                    apikey = self._api_key_factory(raw_key)
-                    # Use aconnect_client for async SDK initialization
-                    await apikey.aconnect_client()
-                    self.apikey_chain[apikey.primary_key] = apikey
+            # Batch-insert pre-created keys (already initialized, no I/O)
+            for pk, apikey in precreated_apikeys.items():
+                # Guard against race: don't double-add if another task already inserted it
+                if pk not in self.apikey_chain:
+                    self.apikey_chain[pk] = apikey
                     self.stats.add_all_apikey([apikey])
-                    added_identifiers.append(raw_key)
-                except Exception:
-                    logger.warning(
-                        "AsyncDynamicKeyManager: failed to create ApiKey for %r",
-                        raw_key, exc_info=True,
-                    )
+                    added_identifiers.append(pk)
 
             # Remove keys that disappeared from server
-            for pk in keys_to_remove:
+            effective_remove = keys_to_remove & final_current
+            for pk in effective_remove:
                 try:
                     super().remove_one(pk)
                     removed_identifiers.append(pk)
                 except KeyError:
                     pass
 
+        # ── Callbacks (lock-free) ────────────────────────────────────────
         if added_identifiers and self._on_keys_added:
             try:
                 result = self._on_keys_added(added_identifiers)
@@ -1468,16 +1621,18 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         if added_identifiers or removed_identifiers:
             logger.info(
                 "AsyncDynamicKeyManager: refresh completed — added %d, removed %d, pool size %d",
-                len(added_identifiers), len(removed_identifiers), len(self.apikey_chain),
+                len(added_identifiers), len(removed_identifiers),
+                len(self.apikey_chain) if hasattr(self, 'apikey_chain') else 0,
             )
 
-        # Sync config from server
+        # Sync config from server (outside lock)
         if self._config_fetcher:
             try:
                 config = self._config_fetcher()
                 if inspect.isawaitable(config):
                     config = await config
-                self.apply_config(config)
+                with self._lock:
+                    self.apply_config(config)
             except Exception:
                 logger.warning("AsyncDynamicKeyManager: config sync failed during refresh", exc_info=True)
 

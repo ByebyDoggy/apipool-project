@@ -91,7 +91,7 @@ from apipool import login, get_keys, ApiKeyManager
 tokens = login("http://localhost:8000", "alice", "password")
 raw_keys = get_keys(
     service_url="http://localhost:8000",
-    client_type="coingecko",
+    pool_identifier="coingecko",
     auth_token=tokens["access_token"],
 )
 # raw_keys = ["CG-xxx", "CG-yyy", ...]
@@ -146,7 +146,7 @@ except PoolExhaustedError:
 |---|---|---|
 | Authenticate | `login(service_url, username, password)` | `await alogin(...)` |
 | Connect to pool | `connect(service_url, pool_identifier, auth_token)` | `await async_connect(...)` |
-| Fetch raw keys | `get_keys(service_url, client_type, auth_token)` | `await aget_keys(...)` |
+| Fetch raw keys | `get_keys(service_url, pool_identifier, auth_token)` | `await aget_keys(...)` |
 
 Async example:
 
@@ -178,7 +178,7 @@ tokens = login("http://localhost:8000", "alice", "password")
 manager = DynamicKeyManager(
     key_fetcher=lambda: get_keys(
         service_url="http://localhost:8000",
-        client_type="coingecko",
+        pool_identifier="coingecko",
         auth_token=tokens["access_token"],
     ),
     api_key_factory=lambda raw_key: CoinGeckoApiKey(raw_key),
@@ -205,7 +205,7 @@ tokens = await alogin("http://localhost:8000", "alice", "password")
 manager = AsyncDynamicKeyManager(
     key_fetcher=lambda: aget_keys(
         service_url="http://localhost:8000",
-        client_type="coingecko",
+        pool_identifier="coingecko",
         auth_token=tokens["access_token"],
     ),
     api_key_factory=lambda raw_key: AsyncCoinGeckoKey(raw_key),
@@ -279,7 +279,7 @@ tokens = login("http://localhost:8000", "alice", "password")
 manager = DynamicKeyManager(
     key_fetcher=lambda: get_keys(
         service_url="http://localhost:8000",
-        client_type="coingecko",
+        pool_identifier="coingecko",
         auth_token=tokens["access_token"],
     ),
     api_key_factory=lambda raw_key: CoinGeckoApiKey(raw_key),

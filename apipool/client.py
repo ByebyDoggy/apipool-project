@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""SDK client module — transparent proxy calls to apipool web service.
+"""SDK client module - transparent proxy calls to apipool web service.
 
 Supports both synchronous and asynchronous SDK clients:
 
@@ -27,7 +27,6 @@ from apipool import ApiKey, ApiKeyManager
 
 
 # ── Pool Configuration ──────────────────────────────────────────────
-
 
 @dataclass
 class PoolConfig:
@@ -58,7 +57,7 @@ class PoolConfig:
             When ``None`` or empty, **any** ``Exception`` triggers key
             rotation (the new default).  Set a specific class to narrow
             down which errors cause a key swap.
-
+    """
     concurrency: int = 0
     timeout: float = 30.0
     rate_limit: int = 0
@@ -68,8 +67,8 @@ class PoolConfig:
     custom: dict = field(default_factory=dict)
 
     # Batch execution tuning
-    batch_retry_on_failure: Optional[bool] = None  # fallback: retry_on_failure
-    batch_max_retries: Optional[int] = None         # fallback: max_retries
+    batch_retry_on_failure: Optional[bool] = None
+    batch_max_retries: Optional[int] = None
     ban_threshold: int = 3
     ban_duration: float = 300.0
 
@@ -116,7 +115,6 @@ class PoolConfig:
 
 # ── Synchronous client ──────────────────────────────────────────────
 
-
 class ServiceApiKey(ApiKey):
     """Server-proxied ApiKey: no sensitive key material held locally."""
 
@@ -127,7 +125,6 @@ class ServiceApiKey(ApiKey):
         self._key_id = key_id
 
     def get_primary_key(self):
-        # Return identifier, NOT the sensitive key
         return self._key_id
 
     def create_client(self):
@@ -163,7 +160,6 @@ class _ServiceClient:
         return resp.json()
 
     def __getattr__(self, item):
-        """Support ChainProxy-style chain navigation."""
         return _ServiceChainLink(self, [item])
 
 
@@ -195,7 +191,6 @@ class _ServiceChainLink:
 
 
 # ── Asynchronous client ─────────────────────────────────────────────
-
 
 class AsyncServiceApiKey(ApiKey):
     """Async server-proxied ApiKey: uses httpx.AsyncClient."""
@@ -242,7 +237,6 @@ class _AsyncServiceClient:
         return resp.json()
 
     def __getattr__(self, item):
-        """Support AsyncChainProxy-style chain navigation."""
         return _AsyncServiceChainLink(self, [item])
 
 
@@ -275,7 +269,6 @@ class _AsyncServiceChainLink:
 
 # ── Public API: sync ────────────────────────────────────────────────
 
-
 def connect(
     service_url: str,
     pool_identifier: str,
@@ -300,7 +293,6 @@ def connect(
             pool_identifier="google-geocoding",
             auth_token=os.environ["APIPOOL_TOKEN"],
         )
-        # Business code is identical to the library mode:
         result = manager.dummyclient.geocode("1600 Amphitheatre Parkway")
     """
     api_key = ServiceApiKey(
@@ -315,14 +307,13 @@ def connect(
 
 # ── Public API: async ───────────────────────────────────────────────
 
-
 async def async_connect(
     service_url: str,
     pool_identifier: str,
     auth_token: str,
 ) -> ApiKeyManager:
     """
-    Async version of connect — creates an ApiKeyManager with AsyncServiceApiKey
+    Async version of connect -- creates an ApiKeyManager with AsyncServiceApiKey
     that uses httpx.AsyncClient for all proxy calls.
 
     Use ``adummyclient`` for async chain calls::
@@ -344,14 +335,11 @@ async def async_connect(
         auth_token=auth_token,
         key_id=f"async-service-proxy:{pool_identifier}",
     )
-    # Pre-connect the async client so ApiKeyManager.__init__ finds it ready
     await api_key.aconnect_client()
-    # Temporarily mark as already connected so add_one skips connect_client()
     api_key._client_connected = True
 
     manager = ApiKeyManager([api_key])
 
-    # Clean up the temp flag
     if hasattr(api_key, "_client_connected"):
         del api_key._client_connected
 
@@ -359,7 +347,6 @@ async def async_connect(
 
 
 # ── Auth helpers ────────────────────────────────────────────────────
-
 
 def login(service_url: str, username: str, password: str) -> dict:
     """
@@ -398,30 +385,29 @@ async def alogin(service_url: str, username: str, password: str) -> dict:
 
 # ── Key retrieval helpers ───────────────────────────────────────────
 
-
 def get_keys(
     service_url: str,
-    client_type: str,
+    pool_identifier: str,
     auth_token: str,
 ) -> list[str]:
     """
-    Fetch decrypted raw API keys from the server for a given client_type.
+    Fetch decrypted raw API keys from the server for a given pool.
 
     This is the building block for constructing local SDK clients with
     key rotation. The typical workflow is:
 
-        1. login()     → get auth_token
-        2. get_keys()  → get raw keys as list[str]
+        1. login()     -> get auth_token
+        2. get_keys()  -> get raw keys as list[str]
         3. Wrap keys into your own ApiKey subclass (e.g. CoinGeckoClient)
         4. Build ApiKeyManager for transparent key rotation
 
     Args:
         service_url: Base URL of the apipool server
-        client_type: The client_type label to filter keys by (e.g. "coingecko")
+        pool_identifier: Pool identifier to fetch keys from (e.g. "ethereum-rpc")
         auth_token: JWT access token for authentication
 
     Returns:
-        list[str] — the raw (decrypted) API key strings
+        list[str] - the raw (decrypted) API key strings
 
     Example:
         from apipool import login, get_keys, ApiKeyManager
@@ -429,10 +415,9 @@ def get_keys(
         tokens = login("http://localhost:8000", "alice", "password")
         keys = get_keys(
             service_url="http://localhost:8000",
-            client_type="coingecko",
+            pool_identifier="ethereum-rpc",
             auth_token=tokens["access_token"],
         )
-        # keys = ["CG-xxx", "CG-yyy", ...]
     """
     with httpx.Client(
         base_url=service_url.rstrip("/"),
@@ -441,7 +426,7 @@ def get_keys(
     ) as client:
         resp = client.get(
             "/api/v1/keys/raw",
-            params={"client_type": client_type},
+            params={"pool_identifier": pool_identifier},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -450,7 +435,7 @@ def get_keys(
 
 async def aget_keys(
     service_url: str,
-    client_type: str,
+    pool_identifier: str,
     auth_token: str,
 ) -> list[str]:
     """Async version of get_keys."""
@@ -461,7 +446,7 @@ async def aget_keys(
     ) as client:
         resp = await client.get(
             "/api/v1/keys/raw",
-            params={"client_type": client_type},
+            params={"pool_identifier": pool_identifier},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -469,7 +454,6 @@ async def aget_keys(
 
 
 # ── Config sync helpers ─────────────────────────────────────────────
-
 
 def get_config(
     service_url: str,
@@ -488,7 +472,7 @@ def get_config(
         auth_token: JWT access token for authentication
 
     Returns:
-        PoolConfig — typed configuration object
+        PoolConfig -- typed configuration object
     """
     with httpx.Client(
         base_url=service_url.rstrip("/"),
