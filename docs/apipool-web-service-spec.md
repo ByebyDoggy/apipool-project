@@ -201,31 +201,31 @@ apipool-project/
 │       ├── rate_limit.py         # 限流中间件
 │       └── audit.py              # 审计日志中间件
 │
-├── apipool_web/                  # ===== 新增: 前端项目 =====
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── src/
-│   │   ├── main.ts
-│   │   ├── App.vue
-│   │   ├── router/
-│   │   ├── stores/               # Pinia 状态管理
-│   │   ├── views/
-│   │   │   ├── Login.vue
-│   │   │   ├── Dashboard.vue     # 统计概览
-│   │   │   ├── KeyManager.vue    # Key 管理
-│   │   │   ├── PoolManager.vue   # 密钥池管理
-│   │   │   └── Settings.vue
-│   │   ├── components/
-│   │   │   ├── KeyForm.vue       # Key 编辑表单
-│   │   │   ├── KeyTable.vue      # Key 列表
-│   │   │   ├── StatsChart.vue    # 统计图表
-│   │   │   └── UsageTimeline.vue # 使用时间线
-│   │   └── api/                  # 后端 API 调用封装
-│   │       ├── auth.ts
-│   │       ├── keys.ts
-│   │       ├── pools.ts
-│   │       └── stats.ts
-│   └── dist/                     # 构建产物 (FastAPI 静态托管)
+├── apipool_server/               # ===== 前后端一体化 =====
+│   ├── frontend/                 # 前端源码 (Vue 3 + Vite + TDesign)
+│   │   ├── package.json
+│   │   ├── vite.config.ts
+│   │   └── src/
+│   │       ├── main.ts
+│   │       ├── App.vue
+│   │       ├── router/
+│   │       ├── stores/           # Pinia 状态管理
+│   │       ├── views/
+│   │       │   ├── Login.vue
+│   │       │   ├── Dashboard.vue # 统计概览
+│   │       │   ├── KeyManager.vue# Key 管理
+│   │       │   └── PoolManager.vue # 密钥池管理
+│   │       ├── components/
+│   │       └── api/              # 后端 API 调用封装
+│   │           ├── auth.ts
+│   │           ├── keys.ts
+│   │           ├── pools.ts
+│   │           └── stats.ts
+│   ├── static/                   # 前端构建产物 (由 vite build 输出)
+│   ├── api/                      # FastAPI 路由
+│   ├── models/                   # SQLAlchemy 模型
+│   ├── schemas/                  # Pydantic 模式
+│   └── services/                 # 业务逻辑
 │
 ├── migrations/                   # Alembic 数据库迁移
 │   ├── alembic.ini
@@ -1597,7 +1597,7 @@ RUN pip install --no-cache-dir -r requirements-server.txt
 # 复制源码
 COPY apipool/ ./apipool/
 COPY apipool_server/ ./apipool_server/
-COPY apipool_web/dist/ ./static/
+COPY apipool_server/ ./apipool_server/
 
 # 数据库迁移
 COPY migrations/ ./migrations/

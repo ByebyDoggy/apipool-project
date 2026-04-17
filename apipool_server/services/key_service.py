@@ -18,6 +18,7 @@ from ..schemas.api_key import (
     ApiKeyResponse, ApiKeyVerifyResponse, BatchImportRequest, BatchImportResponse,
     RawKeyItem, RawKeyListResponse, SingleRawKeyResponse,
 )
+from cryptography.fernet import InvalidToken
 
 
 class KeyService:
@@ -52,8 +53,10 @@ class KeyService:
 
     def list_keys(
         self, user: User,
-        pool_id: Optional[int] = None,  # changed: filter by pool membership instead of client_type
+        pool_id: Optional[int] = None,
         is_active: Optional[bool] = None, tag: Optional[str] = None,
+        search: Optional[str] = None,
+        verification_status: Optional[str] = None,
         page: int = 1, page_size: int = 20,
     ) -> tuple[list[ApiKeyResponse], int]:
         query = self.db.query(ApiKeyEntry).filter(
@@ -61,7 +64,6 @@ class KeyService:
         )
 
         if pool_id:
-            # Filter by pool membership via pool_members
             key_ids = self.db.query(PoolMember.key_id).filter(
                 PoolMember.pool_id == pool_id
             ).subquery()
@@ -70,6 +72,13 @@ class KeyService:
             query = query.filter(ApiKeyEntry.is_active == is_active)
         if tag:
             query = query.filter(ApiKeyEntry.tags.contains([tag]))
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                (ApiKeyEntry.identifier.ilike(pattern)) | (ApiKeyEntry.alias.ilike(pattern))
+            )
+        if verification_status:
+            query = query.filter(ApiKeyEntry.verification_status == verification_status)
 
         total = query.count()
         items = query.order_by(ApiKeyEntry.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
@@ -114,7 +123,17 @@ class KeyService:
 
         keys = []
         for entry in entries:
-            raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+            try:
+                raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+            except InvalidToken:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"无法解密 Key '{entry.identifier}'：加密密钥不匹配。"
+                        "数据库中的密文是用不同的 APIPOOL_ENCRYPTION_KEY 加密的。"
+                        "请使用迁移脚本重新加密数据。"
+                    ),
+                )
             keys.append(RawKeyItem(
                 identifier=entry.identifier,
                 raw_key=raw_key,
@@ -135,7 +154,17 @@ class KeyService:
     def get_raw_key(self, user: User, identifier: str) -> SingleRawKeyResponse:
         """Get decrypted raw key for a single key entry (for frontend display)."""
         entry = self._get_entry(user, identifier)
-        raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+        try:
+            raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+        except InvalidToken:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"无法解密 Key '{identifier}'：加密密钥不匹配。"
+                    "数据库中的密文是用不同的 APIPOOL_ENCRYPTION_KEY 加密的。"
+                    "请使用迁移脚本重新加密数据，或删除并重新创建该 Key。"
+                ),
+            )
         return SingleRawKeyResponse(
             id=entry.id,
             identifier=entry.identifier,
@@ -158,6 +187,8 @@ class KeyService:
             entry.description = req.description
         if req.client_config is not None:
             entry.client_config = req.client_config
+        if req.is_active is not None:
+            entry.is_active = req.is_active
 
         self.db.commit()
         self.db.refresh(entry)
@@ -192,6 +223,14 @@ class KeyService:
 
             is_usable = apikey.is_usable()
             entry.verification_status = "valid" if is_usable else "invalid"
+        except InvalidToken:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"无法解密 Key '{identifier}' 进行验证：加密密钥不匹配。"
+                    "请使用迁移脚本重新加密数据。"
+                ),
+            )
         except Exception:
             entry.verification_status = "invalid"
             is_usable = False

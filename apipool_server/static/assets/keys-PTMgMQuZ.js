@@ -1,1 +1,0 @@
-import{m as t}from"./index-DUlOAYYB.js";function s(e){return t.get("/keys",{params:e})}function u(e){return t.post("/keys",e)}function y(e,r){return t.put(`/keys/${e}`,r)}function o(e){return t.delete(`/keys/${e}`)}function i(e){return t.post(`/keys/${e}/verify`)}export{u as c,o as d,s as l,y as u,i as v};

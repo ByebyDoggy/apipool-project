@@ -22,6 +22,7 @@ class ApiKeyUpdateRequest(BaseModel):
     tags: list[str] | None = None
     description: str | None = None
     client_config: dict[str, Any] | None = None
+    is_active: bool | None = None
 
 
 class ApiKeyRotateRequest(BaseModel):

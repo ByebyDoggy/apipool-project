@@ -33,6 +33,8 @@ def list_keys(
     pool_id: Optional[int] = Query(None, description="Filter by pool membership (pool ID)"),
     is_active: Optional[bool] = Query(None),
     tag: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="Search by identifier or alias"),
+    verification_status: Optional[str] = Query(None, description="Filter by verification status (verified/unverified/invalid)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(get_current_user),
@@ -40,7 +42,7 @@ def list_keys(
 ):
     """List all API Keys for the current user."""
     service = KeyService(db)
-    items, total = service.list_keys(user, pool_id, is_active, tag, page, page_size)
+    items, total = service.list_keys(user, pool_id, is_active, tag, search, verification_status, page, page_size)
     return PageResponse(items=items, total=total, page=page, page_size=page_size)
 
 

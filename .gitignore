@@ -147,3 +147,11 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# Frontend
+apipool_server/frontend/node_modules/
+apipool_server/frontend/dist/
+apipool_server/static/
+
+# Root package-lock (belongs to frontend now)
+/package-lock.json

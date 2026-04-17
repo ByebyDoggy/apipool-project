@@ -12,18 +12,61 @@
         </div>
       </template>
 
+      <!-- Search & Filter Bar -->
+      <div class="filter-bar">
+        <t-space align="center" wrap>
+          <t-input
+            v-model="searchKeyword"
+            placeholder="搜索标识符/别名..."
+            clearable
+            style="width: 240px"
+            @enter="loadKeys"
+            @clear="loadKeys"
+          >
+            <template #prefixIcon><t-icon name="search" /></template>
+          </t-input>
+          <t-select
+            v-model="filterStatus"
+            placeholder="状态"
+            clearable
+            style="width: 120px"
+            @change="onFilterChange"
+          >
+            <t-option value="true" label="启用" />
+            <t-option value="false" label="停用" />
+          </t-select>
+          <t-select
+            v-model="filterVerification"
+            placeholder="验证状态"
+            clearable
+            style="width: 140px"
+            @change="onFilterChange"
+          >
+            <t-option value="verified" label="已验证" />
+            <t-option value="unverified" label="未验证" />
+            <t-option value="invalid" label="失败" />
+          </t-select>
+          <t-button variant="outline" @click="resetFilters">重置</t-button>
+        </t-space>
+      </div>
+
       <t-table
+        v-if="mounted"
         :data="keys"
         :columns="columns"
         :loading="loading"
         row-key="identifier"
         hover
         stripe
+        :pagination="{ total, current: currentPage, pageSize }"
+        @page-change="onPageChange"
       >
         <template #is_active="{ row }">
-          <t-tag :theme="row.is_active ? 'success' : 'default'" variant="light" size="small">
-            {{ row.is_active ? '启用' : '停用' }}
-          </t-tag>
+          <t-switch
+            :value="row.is_active"
+            size="small"
+            @change="(val: boolean) => onToggleActive(row, val)"
+          />
         </template>
         <template #verification_status="{ row }">
           <t-tag :theme="row.verification_status === 'verified' ? 'success' : row.verification_status === 'unverified' ? 'warning' : 'danger'" variant="light" size="small">
@@ -45,7 +88,7 @@
 
       <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
         <t-pagination
-          v-model="currentPage"
+          v-model:current="currentPage"
           :total="total"
           :page-size="pageSize"
           show-jumper
@@ -53,8 +96,6 @@
         />
       </div>
     </t-card>
-
-    <!-- Create / Edit Dialog -->
     <t-dialog
       v-model:visible="showDialog"
       :header="editingKey ? '编辑 Key' : '新增 Key'"
@@ -120,16 +161,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import { listKeys, createKey, updateKey, deleteKey, verifyKey, getRawKey, type ApiKeyResponse, type ApiKeyCreate, type ApiKeyUpdate } from '@/api/keys'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { extractErrorMessage } from '@/api/errors'
 
 const keys = ref<ApiKeyResponse[]>([])
 const loading = ref(false)
+const mounted = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+
+// Search & filter state
+const searchKeyword = ref('')
+const filterStatus = ref<string | null>(null)
+const filterVerification = ref<string | null>(null)
 
 const showDialog = ref(false)
 const dialogLoading = ref(false)
@@ -172,6 +219,13 @@ async function loadKeys() {
   loading.value = true
   try {
     const params: any = { page: currentPage.value, page_size: pageSize.value }
+    // Apply search keyword
+    if (searchKeyword.value) params.search = searchKeyword.value
+    // Apply status filter
+    if (filterStatus.value !== null && filterStatus.value !== undefined)
+      params.is_active = filterStatus.value === 'true'
+    // Apply verification filter
+    if (filterVerification.value) params.verification_status = filterVerification.value
     const res = await listKeys(params)
     keys.value = res.data.items
     total.value = res.data.total
@@ -182,10 +236,40 @@ async function loadKeys() {
   }
 }
 
+function onFilterChange() {
+  currentPage.value = 1
+  loadKeys()
+}
+
+function resetFilters() {
+  searchKeyword.value = ''
+  filterStatus.value = null
+  filterVerification.value = null
+  currentPage.value = 1
+  loadKeys()
+}
+
+function onPageChange(pageInfo: { current: number; pageSize: number }) {
+  currentPage.value = pageInfo.current
+  pageSize.value = pageInfo.pageSize
+  loadKeys()
+}
+
 function openCreate() {
   editingKey.value = null
   resetForm()
   showDialog.value = true
+}
+
+async function onToggleActive(row: ApiKeyResponse, isActive: boolean) {
+  try {
+    await updateKey(row.identifier, { is_active: isActive })
+    row.is_active = isActive
+    MessagePlugin.success(isActive ? '已启用' : '已停用')
+  } catch {
+    MessagePlugin.error('状态切换失败')
+    loadKeys()
+  }
 }
 
 async function onViewRaw(row: ApiKeyResponse) {
@@ -295,7 +379,12 @@ function resetForm() {
   }
 }
 
-onMounted(loadKeys)
+onMounted(async () => {
+  // Wait for full DOM render before showing table (fixes lazy-load route #op slot issue)
+  await nextTick()
+  mounted.value = true
+  loadKeys()
+})
 </script>
 
 <style scoped>
@@ -304,5 +393,9 @@ onMounted(loadKeys)
   justify-content: space-between;
   align-items: center;
   width: 100%;
+}
+
+.filter-bar {
+  margin-bottom: 16px;
 }
 </style>

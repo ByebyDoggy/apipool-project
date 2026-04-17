@@ -18,6 +18,7 @@ from ..schemas.pool import (
     PoolCreateRequest, PoolUpdateRequest, PoolAddMembersRequest,
     PoolResponse, PoolMemberResponse, PoolStatusResponse, PoolConfigResponse,
 )
+from cryptography.fernet import InvalidToken
 from ..services.client_registry import GenericApiKey
 
 
@@ -215,7 +216,16 @@ class PoolService:
         # client_type is metadata only — doesn't affect key instantiation
         apikey_list = []
         for member_entry in members:
-            raw_key = KeyEncryption.decrypt(member_entry.encrypted_key)
+            try:
+                raw_key = KeyEncryption.decrypt(member_entry.encrypted_key)
+            except InvalidToken:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"无法解密池中 Key '{member_entry.identifier}'：加密密钥不匹配。"
+                        "请使用迁移脚本重新加密数据。"
+                    ),
+                )
             # Use GenericApiKey: creates a generic HTTP client (httpx)
             # with Bearer token auth. Users can customize via client_config.
             apikey = GenericApiKey(raw_key=raw_key, client_config=member_entry.client_config)

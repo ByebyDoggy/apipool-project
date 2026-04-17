@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { login as apiLogin, register as apiRegister, refreshToken as apiRefresh, getProfile, type TokenResponse, type UserResponse } from '@/api/auth'
+import { login as apiLogin, register as apiRegister, refreshToken as apiRefresh, getProfile, logout as apiLogout, type TokenResponse, type UserResponse } from '@/api/auth'
 
 const TOKEN_KEY = 'apipool_token'
 const REFRESH_KEY = 'apipool_refresh'
@@ -50,6 +50,12 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    // Best-effort: notify server to revoke refresh token
+    if (refreshTokenVal.value) {
+      apiLogout(refreshTokenVal.value).catch(() => {
+        // Ignore errors — local cleanup always proceeds
+      })
+    }
     token.value = ''
     refreshTokenVal.value = ''
     user.value = null

@@ -42,3 +42,8 @@ export function refreshToken(refresh_token: string) {
 export function getProfile() {
   return http.get<UserResponse>('/auth/me')
 }
+
+export function logout(refresh_token: string) {
+  // Fire-and-forget: best-effort token revocation
+  return http.post('/auth/logout', { refresh_token })
+}

@@ -19,7 +19,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: resolve(__dirname, '../apipool_server/static'),
+    outDir: resolve(__dirname, '../static'),
     emptyOutDir: true,
   },
 })

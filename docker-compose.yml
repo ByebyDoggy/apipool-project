@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  apipool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apipool-server
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Database
+      - DATABASE_URL=sqlite:///./data/apipool_server.db
+      # Security — MUST override these in production!
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      - APIPOOL_ENCRYPTION_KEY=${APIPOOL_ENCRYPTION_KEY:-}
+      - APIPOOL_ADMIN_USERNAME=${APIPOOL_ADMIN_USERNAME:-admin}
+      - APIPOOL_ADMIN_PASSWORD=${APIPOOL_ADMIN_PASSWORD:-admin}
+      - APIPOOL_ADMIN_EMAIL=${APIPOOL_ADMIN_EMAIL:-admin@apipool.local}
+      # Server
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    volumes:
+      - apipool-data:/app/data  # Persist SQLite DB across restarts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  apipool-data:
+    driver: local

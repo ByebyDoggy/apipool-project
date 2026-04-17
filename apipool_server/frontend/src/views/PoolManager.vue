@@ -10,7 +10,7 @@
         </div>
       </template>
 
-      <t-table :data="pools" :columns="columns" :loading="loading" row-key="identifier" hover stripe>
+      <t-table v-if="mounted" :data="pools" :columns="columns" :loading="loading" row-key="identifier" hover stripe>
         <template #is_active="{ row }">
           <t-tag :theme="row.is_active ? 'success' : 'default'" variant="light" size="small">
             {{ row.is_active ? '启用' : '停用' }}
@@ -78,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import { listPools, createPool, updatePool, deletePool, type PoolResponse, type PoolCreate, type PoolUpdate } from '@/api/pools'
 import { listKeys, type ApiKeyResponse } from '@/api/keys'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
@@ -87,6 +87,7 @@ import { extractErrorMessage } from '@/api/errors'
 const pools = ref<PoolResponse[]>([])
 const availableKeys = ref<ApiKeyResponse[]>([])
 const loading = ref(false)
+const mounted = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -232,7 +233,9 @@ function resetForm() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await nextTick()
+  mounted.value = true
   loadPools()
 })
 </script>

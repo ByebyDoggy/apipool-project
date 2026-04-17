@@ -14,6 +14,7 @@ export interface ApiKeyUpdate {
   tags?: string[] | null
   description?: string | null
   client_config?: Record<string, any> | null
+  is_active?: boolean | null
 }
 
 export interface ApiKeyRotateRequest {
@@ -65,6 +66,8 @@ export interface KeyListParams {
   pool_id?: number
   is_active?: boolean
   tag?: string
+  search?: string
+  verification_status?: string
 }
 
 export function listKeys(params?: KeyListParams) {

@@ -54,6 +54,7 @@ result = manager.dummyclient.some_method()</code></pre>
           <!-- Tab 2: Members -->
           <t-tab-panel value="members" label="成员列表">
             <t-table
+              v-if="mounted"
               :data="pool?.members || []"
               :columns="memberColumns"
               row-key="key_identifier"
@@ -277,7 +278,7 @@ result = manager.dummyclient.some_method()</code></pre>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   getPool, addMembers, removeMember, getPoolConfig, updatePool,
@@ -294,6 +295,7 @@ const poolIdentifier = route.params.id as string
 const pool = ref<PoolResponse | null>(null)
 const availableKeys = ref<ApiKeyResponse[]>([])
 const loading = ref(false)
+const mounted = ref(false)
 const showAddMemberDialog = ref(false)
 const addMemberLoading = ref(false)
 const selectedKeyIdentifiers = ref<string[]>([])
@@ -523,6 +525,8 @@ async function onAddMembers() {
 }
 
 onMounted(async () => {
+  await nextTick()
+  mounted.value = true
   await loadPool()
   loadAvailableKeys()
   if (activeTab.value === 'config') {

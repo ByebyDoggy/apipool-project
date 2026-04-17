@@ -46,6 +46,19 @@ _MIGRATIONS = [
      "ALTER TABLE pool_members ADD COLUMN weight INTEGER DEFAULT 1"),
 ]
 
+# New tables to create if they don't exist (for backward compatibility)
+_NEW_TABLES = [
+    """CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        token_jti VARCHAR(255) UNIQUE NOT NULL,
+        is_revoked BOOLEAN DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        revoked_at DATETIME,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )""",
+]
+
 
 def get_engine():
     global _engine
@@ -81,8 +94,19 @@ def get_db():
 
 
 def _run_migrations(engine):
-    """Add missing columns to existing tables (simple ALTER TABLE migration)."""
+    """Add missing columns to existing tables and create new tables."""
     inspector = inspect(engine)
+
+    # Create new tables if they don't exist
+    for create_sql in _NEW_TABLES:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(create_sql))
+            logger.info("Migration: created new table")
+        except Exception as exc:
+            logger.debug("Table creation skipped: %s", exc)
+
+    # Add missing columns
     for table_name, column_name, alter_sql in _MIGRATIONS:
         if table_name not in inspector.get_table_names():
             continue

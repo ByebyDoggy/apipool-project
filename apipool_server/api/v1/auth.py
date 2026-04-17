@@ -3,7 +3,8 @@
 
 """Auth API routes."""
 
-from fastapi import APIRouter, Depends, Header
+import logging
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ...database import get_db
@@ -14,6 +15,8 @@ from ...schemas.auth import (
 )
 from ...services.auth_service import AuthService
 
+logger = logging.getLogger("apipool.auth")
+
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
@@ -23,7 +26,6 @@ def _get_current_user(
 ) -> User:
     """Extract and validate current user from Authorization header."""
     if not authorization.startswith("Bearer "):
-        from fastapi import HTTPException, status
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid Authorization header",
@@ -36,6 +38,27 @@ def _get_current_user(
 
 # Dependency for protected routes
 get_current_user = _get_current_user
+
+
+def require_role(allowed_roles: list[str]):
+    """Dependency factory: restrict access to specific roles."""
+    def role_checker(user: User = Depends(get_current_user)) -> User:
+        if user.role not in allowed_roles:
+            logger.warning(
+                "User '%s' (role=%s) attempted admin-only resource",
+                user.username,
+                user.role,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires one of roles: {', '.join(allowed_roles)}",
+            )
+        return user
+    return role_checker
+
+
+# Convenience: admin-only dependency
+get_admin_user = require_role(["admin"])
 
 
 # Public endpoints
@@ -65,3 +88,11 @@ def refresh(req: RefreshRequest, db: Session = Depends(get_db)):
 def get_me(user: User = Depends(get_current_user)):
     """Get current user profile."""
     return user
+
+
+@router.post("/logout")
+def logout(req: RefreshRequest, db: Session = Depends(get_db)):
+    """Revoke refresh token (logout)."""
+    service = AuthService(db)
+    service.logout(req.refresh_token)
+    return {"message": "ok"}
