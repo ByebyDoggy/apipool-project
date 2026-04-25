@@ -29,28 +29,37 @@ def validate_is_apikey(obj):
 
 
 class ApiCaller(object):
-    def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc):
+    def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc, attr_path=None):
         self.apikey = apikey
         self.apikey_manager = apikey_manager
         self.call_method = call_method
         self.reach_limit_exc = reach_limit_exc
+        self._attr_path = attr_path or []
 
     def __call__(self, *args, **kwargs):
+        method_name = ".".join(self._attr_path) if self._attr_path else None
+        start = time.monotonic()
         try:
             res = self.call_method(*args, **kwargs)
+            latency = time.monotonic() - start
             self.apikey_manager.stats.add_event(
                 self.apikey.primary_key, StatusCollection.c1_Success.id,
+                latency=latency, method=method_name,
             )
             return res
         except self.reach_limit_exc as e:
+            latency = time.monotonic() - start
             self.apikey_manager.remove_one(self.apikey.primary_key)
             self.apikey_manager.stats.add_event(
                 self.apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+                latency=latency, method=method_name,
             )
             raise e
         except Exception as e:
+            latency = time.monotonic() - start
             self.apikey_manager.stats.add_event(
                 self.apikey.primary_key, StatusCollection.c5_Failed.id,
+                latency=latency, method=method_name,
             )
             raise e
 
@@ -110,6 +119,7 @@ class ChainProxy(object):
             apikey_manager=self._manager,
             call_method=target,
             reach_limit_exc=self._reach_limit_exc,
+            attr_path=self._attr_path,
         )(*args, **kwargs)
 
     def __repr__(self):
@@ -248,11 +258,15 @@ class ApiKeyManager(object):
         for primary_key, apikey in self.apikey_chain.items():
             if apikey.is_usable():
                 self.stats.add_event(
-                    primary_key, StatusCollection.c1_Success.id)
+                    primary_key, StatusCollection.c1_Success.id,
+                    method="check_usable",
+                )
             else:
                 self.remove_one(primary_key)
                 self.stats.add_event(
-                    primary_key, StatusCollection.c5_Failed.id)
+                    primary_key, StatusCollection.c5_Failed.id,
+                    method="check_usable",
+                )
 
         if len(self.apikey_chain) == 0:
             sys.stdout.write("\nThere's no API Key usable!")
@@ -427,10 +441,10 @@ class ApiKeyManager(object):
     # ── Batch execution ─────────────────────────────────────────────
 
     @staticmethod
-    def _safe_stats(stats, primary_key, status_id):
+    def _safe_stats(stats, primary_key, status_id, latency=None, method=None):
         """Record a stats event without letting DB errors propagate."""
         try:
-            stats.add_event(primary_key, status_id)
+            stats.add_event(primary_key, status_id, latency=latency, method=method)
         except Exception:
             logger.debug("batch_exec: stats recording failed (ignored)", exc_info=True)
 
@@ -593,6 +607,7 @@ class ApiKeyManager(object):
             used_keys: set = set()
 
             for attempt in range(attempts):
+                start = time.monotonic()
                 apikey = _pick_key()
                 if apikey is None:
                     last_exc = PoolExhaustedError(
@@ -618,15 +633,20 @@ class ApiKeyManager(object):
 
                 try:
                     target = self._resolve_method(apikey, method_name)
+                    start = time.monotonic()  # re-measure from actual call start
                     result = target(*args, **kwargs)
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id
+                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id,
+                        latency=latency, method=method_name,
                     )
                     _record_key_success(apikey.primary_key)
                     return result
                 except self.reach_limit_exc as e:
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id
+                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+                        latency=latency, method=method_name,
                     )
                     # Key hit rate limit — remove from pool + ban
                     with self._lock if hasattr(self, "_lock") else _dummy_context():
@@ -637,8 +657,10 @@ class ApiKeyManager(object):
                     if not retry_on_failure:
                         break
                 except Exception as e:
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id,
+                        latency=latency, method=method_name,
                     )
                     _record_key_failure(apikey.primary_key)
                     last_exc = e
@@ -786,6 +808,7 @@ class ApiKeyManager(object):
             used_keys: set = set()
 
             for attempt in range(attempts):
+                start = time.monotonic()
                 apikey = await _pick_key()
                 if apikey is None:
                     last_exc = PoolExhaustedError(
@@ -809,17 +832,22 @@ class ApiKeyManager(object):
 
                 try:
                     target = self._resolve_method(apikey, method_name)
+                    start = time.monotonic()  # re-measure from actual call start
                     result = target(*args, **kwargs)
                     if inspect.isawaitable(result):
                         result = await asyncio.wait_for(result, timeout=timeout)
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id
+                        self.stats, apikey.primary_key, StatusCollection.c1_Success.id,
+                        latency=latency, method=method_name,
                     )
                     await _record_key_success(apikey.primary_key)
                     return result
                 except self.reach_limit_exc as e:
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id
+                        self.stats, apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+                        latency=latency, method=method_name,
                     )
                     with self._lock if hasattr(self, "_lock") else _dummy_context():
                         if apikey.primary_key in self.apikey_chain:
@@ -829,16 +857,20 @@ class ApiKeyManager(object):
                     if not retry_on_failure:
                         break
                 except asyncio.TimeoutError as e:
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id,
+                        latency=latency, method=method_name,
                     )
                     await _record_key_failure(apikey.primary_key)
                     last_exc = e
                     if not retry_on_failure:
                         break
                 except Exception as e:
+                    latency = time.monotonic() - start
                     self._safe_stats(
-                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id
+                        self.stats, apikey.primary_key, StatusCollection.c5_Failed.id,
+                        latency=latency, method=method_name,
                     )
                     await _record_key_failure(apikey.primary_key)
                     last_exc = e
@@ -902,11 +934,12 @@ class AsyncApiCaller(object):
     # 可配置的最大 null 结果重试次数（0=不重试，兼容旧行为）
     _max_null_retries: int = 3
 
-    def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc):
+    def __init__(self, apikey, apikey_manager, call_method, reach_limit_exc, attr_path=None):
         self.apikey = apikey
         self.apikey_manager = apikey_manager
         self.call_method = call_method
         self.reach_limit_exc = reach_limit_exc
+        self._attr_path = attr_path or []
 
     async def __call__(self, *args, **kwargs):
         # ── Null 结果自动重试机制 ──
@@ -915,8 +948,10 @@ class AsyncApiCaller(object):
         tried_keys = set()
         tried_keys.add(self.apikey.primary_key)
         last_exc = None
+        method_name = ".".join(self._attr_path) if self._attr_path else None
 
         for attempt in range(self._max_null_retries + 1):
+            start = time.monotonic()
             try:
                 res = self.call_method(*args, **kwargs)
                 # If the resolved method is a coroutine, await it
@@ -925,12 +960,15 @@ class AsyncApiCaller(object):
 
                 # 判断是否为 null/空结果（需要实际数据的 RPC 调用不应返回 None）
                 if res is not None and res is not False and res != '':
+                    latency = time.monotonic() - start
                     self.apikey_manager.stats.add_event(
                         self.apikey.primary_key, StatusCollection.c1_Success.id,
+                        latency=latency, method=method_name,
                     )
                     return res
 
                 # ── Null 结果 → 记录并尝试下一个 key ──
+                latency = time.monotonic() - start
                 last_exc = f'Null result on attempt {attempt + 1}'
                 logger.debug(
                     '[AsyncApiCaller] Null result for %s (attempt %d/%d), trying next key...',
@@ -940,17 +978,22 @@ class AsyncApiCaller(object):
                 )
                 self.apikey_manager.stats.add_event(
                     self.apikey.primary_key, StatusCollection.c5_Failed.id,
+                    latency=latency, method=method_name,
                 )
 
             except self.reach_limit_exc as e:
+                latency = time.monotonic() - start
                 self.apikey_manager.remove_one(self.apikey.primary_key)
                 self.apikey_manager.stats.add_event(
                     self.apikey.primary_key, StatusCollection.c9_ReachLimit.id,
+                    latency=latency, method=method_name,
                 )
                 raise e
             except Exception as e:
+                latency = time.monotonic() - start
                 self.apikey_manager.stats.add_event(
                     self.apikey.primary_key, StatusCollection.c5_Failed.id,
+                    latency=latency, method=method_name,
                 )
                 raise e
 
@@ -1058,13 +1101,7 @@ class AsyncChainProxy(object):
             apikey_manager=self._manager,
             call_method=target,
             reach_limit_exc=self._reach_limit_exc,
-        )(*args, **kwargs)
-
-        return await AsyncApiCaller(
-            apikey=apikey,
-            apikey_manager=self._manager,
-            call_method=target,
-            reach_limit_exc=self._reach_limit_exc,
+            attr_path=self._attr_path,
         )(*args, **kwargs)
 
     def __repr__(self):
@@ -1153,6 +1190,11 @@ class DynamicKeyManager(ApiKeyManager):
         on_keys_added: Optional[Callable[[List[str]], None]] = None,
         on_keys_removed: Optional[Callable[[List[str]], None]] = None,
         config_fetcher: Optional[Callable] = None,
+        pool_identifier: Optional[str] = None,
+        stats_report_url: Optional[str] = None,
+        stats_report_token: Optional[str] = None,
+        stats_report_interval: float = 30.0,
+        stats_report_batch_size: int = 500,
     ):
         self._key_fetcher = key_fetcher
         self._api_key_factory = api_key_factory
@@ -1160,8 +1202,32 @@ class DynamicKeyManager(ApiKeyManager):
         self._on_keys_added = on_keys_added
         self._on_keys_removed = on_keys_removed
         self._config_fetcher = config_fetcher
+        self._pool_identifier = pool_identifier or "default"
+        self._stats_report_url = stats_report_url
+        self._stats_report_token = stats_report_token
+        self._stats_report_interval = stats_report_interval
+        self._stats_report_batch_size = stats_report_batch_size
         self._lock = threading.RLock()
         self._shutdown_event = threading.Event()
+
+        # Client ID for stats reporting dedup
+        import socket
+        import os
+        self._client_id = "{}:{}".format(
+            socket.gethostname(), os.getpid()
+        )
+
+        # Use file-based SQLite for stats if no engine provided and reporting is enabled
+        if db_engine is None and stats_report_url:
+            import tempfile
+            from sqlalchemy import create_engine
+            stats_dir = os.path.join(tempfile.gettempdir(), "apipool_stats")
+            os.makedirs(stats_dir, exist_ok=True)
+            db_path = os.path.join(stats_dir, f"{self._pool_identifier}.db")
+            db_engine = create_engine(
+                f"sqlite:///{db_path}",
+                connect_args={"check_same_thread": False},
+            )
 
         # Initial fetch
         try:
@@ -1193,6 +1259,16 @@ class DynamicKeyManager(ApiKeyManager):
             daemon=True,
         )
         self._refresh_thread.start()
+
+        # Start background stats report thread (only if reporting is configured)
+        self._report_thread = None
+        if self._stats_report_url:
+            self._report_thread = threading.Thread(
+                target=self._report_loop,
+                name="apipool-stats-report",
+                daemon=True,
+            )
+            self._report_thread.start()
 
     # ── Thread-safe overrides ────────────────────────────────────────
 
@@ -1327,12 +1403,67 @@ class DynamicKeyManager(ApiKeyManager):
             except Exception:
                 logger.warning("DynamicKeyManager: config sync failed during refresh", exc_info=True)
 
+    # ── Stats reporting ───────────────────────────────────────────────
+
+    def _report_loop(self):
+        """Background loop that periodically reports stats to the server."""
+        while not self._shutdown_event.wait(timeout=self._stats_report_interval):
+            try:
+                self._do_report()
+            except Exception:
+                logger.exception("DynamicKeyManager: stats report failed")
+
+    def _do_report(self):
+        """Fetch pending events from local SQLite, POST to server, then delete."""
+        import httpx
+
+        events = self.stats.fetch_events_batch(limit=self._stats_report_batch_size)
+        if not events:
+            return
+
+        status_map = StatusCollection.get_mapper_id_to_description()
+        report_events = []
+        for evt in events:
+            finished_at = evt["finished_at"]
+            report_events.append({
+                "key_identifier": evt["key_identifier"],
+                "status": status_map.get(evt["status_id"], "unknown"),
+                "latency": evt["latency"],
+                "method": evt["method"],
+                "finished_at": finished_at.isoformat() if finished_at else None,
+            })
+
+        try:
+            resp = httpx.post(
+                f"{self._stats_report_url}/api/v1/stats/report",
+                json={
+                    "pool_identifier": self._pool_identifier,
+                    "client_id": self._client_id,
+                    "events": report_events,
+                },
+                headers={"Authorization": f"Bearer {self._stats_report_token}"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            if result.get("accepted", 0) > 0:
+                self.stats.delete_events(events)
+                logger.info(
+                    "DynamicKeyManager: reported %d stats events, deleted from local DB",
+                    result["accepted"],
+                )
+        except Exception:
+            logger.warning("DynamicKeyManager: stats report HTTP request failed", exc_info=True)
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def shutdown(self):
-        """Stop the background refresh thread gracefully."""
+        """Stop the background refresh and report threads gracefully."""
         self._shutdown_event.set()
         self._refresh_thread.join(timeout=5.0)
+        if self._report_thread is not None:
+            self._report_thread.join(timeout=5.0)
         logger.info("DynamicKeyManager: shutdown complete")
 
     @property
@@ -1390,6 +1521,11 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         on_keys_added: Optional[Callable] = None,
         on_keys_removed: Optional[Callable] = None,
         config_fetcher: Optional[Callable] = None,
+        pool_identifier: Optional[str] = None,
+        stats_report_url: Optional[str] = None,
+        stats_report_token: Optional[str] = None,
+        stats_report_interval: float = 30.0,
+        stats_report_batch_size: int = 500,
     ):
         self._key_fetcher = key_fetcher
         self._api_key_factory = api_key_factory
@@ -1397,9 +1533,34 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         self._on_keys_added = on_keys_added
         self._on_keys_removed = on_keys_removed
         self._config_fetcher = config_fetcher
+        self._pool_identifier = pool_identifier or "default"
+        self._stats_report_url = stats_report_url
+        self._stats_report_token = stats_report_token
+        self._stats_report_interval = stats_report_interval
+        self._stats_report_batch_size = stats_report_batch_size
         self._lock = threading.RLock()
         self._async_shutdown_event = None  # asyncio.Event, set in astart()
         self._refresh_task = None
+        self._report_task = None
+
+        # Client ID for stats reporting dedup
+        import socket
+        import os
+        self._client_id = "{}:{}".format(
+            socket.gethostname(), os.getpid()
+        )
+
+        # Use file-based SQLite for stats if no engine provided and reporting is enabled
+        if db_engine is None and stats_report_url:
+            from sqlalchemy import create_engine
+            import tempfile
+            stats_dir = os.path.join(tempfile.gettempdir(), "apipool_stats")
+            os.makedirs(stats_dir, exist_ok=True)
+            db_path = os.path.join(stats_dir, f"{self._pool_identifier}.db")
+            db_engine = create_engine(
+                f"sqlite:///{db_path}",
+                connect_args={"check_same_thread": False},
+            )
 
         # Initial fetch (sync — caller should do async init separately)
         initial_apikeys = []
@@ -1475,15 +1636,24 @@ class AsyncDynamicKeyManager(ApiKeyManager):
         self._async_shutdown_event = asyncio.Event()
         await self.ainit()
         self._refresh_task = asyncio.ensure_future(self._arefresh_loop())
+        # Start stats report task if reporting is configured
+        if self._stats_report_url:
+            self._report_task = asyncio.ensure_future(self._areport_loop())
 
     async def ashutdown(self):
-        """Stop the auto-refresh background task."""
+        """Stop the auto-refresh and report background tasks."""
         if self._async_shutdown_event is not None:
             self._async_shutdown_event.set()
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
                 await self._refresh_task
+            except Exception:
+                pass
+        if self._report_task is not None:
+            self._report_task.cancel()
+            try:
+                await self._report_task
             except Exception:
                 pass
         logger.info("AsyncDynamicKeyManager: shutdown complete")
@@ -1506,6 +1676,70 @@ class AsyncDynamicKeyManager(ApiKeyManager):
                 await self.arefresh()
             except Exception:
                 logger.exception("AsyncDynamicKeyManager: refresh failed")
+
+    # ── Async stats reporting ──────────────────────────────────────────
+
+    async def _areport_loop(self):
+        """Background asyncio task that periodically reports stats to the server."""
+        import asyncio
+        while not self._async_shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._async_shutdown_event.wait(),
+                    timeout=self._stats_report_interval,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                await self._ado_report()
+            except Exception:
+                logger.exception("AsyncDynamicKeyManager: stats report failed")
+
+    async def _ado_report(self):
+        """Async stats reporting: fetch events, POST to server, delete on success."""
+        import httpx
+
+        events = self.stats.fetch_events_batch(limit=self._stats_report_batch_size)
+        if not events:
+            return
+
+        status_map = StatusCollection.get_mapper_id_to_description()
+        report_events = []
+        for evt in events:
+            finished_at = evt["finished_at"]
+            report_events.append({
+                "key_identifier": evt["key_identifier"],
+                "status": status_map.get(evt["status_id"], "unknown"),
+                "latency": evt["latency"],
+                "method": evt["method"],
+                "finished_at": finished_at.isoformat() if finished_at else None,
+            })
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{self._stats_report_url}/api/v1/stats/report",
+                    json={
+                        "pool_identifier": self._pool_identifier,
+                        "client_id": self._client_id,
+                        "events": report_events,
+                    },
+                    headers={"Authorization": f"Bearer {self._stats_report_token}"},
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+
+                if result.get("accepted", 0) > 0:
+                    self.stats.delete_events(events)
+                    logger.info(
+                        "AsyncDynamicKeyManager: reported %d stats events, deleted from local DB",
+                        result["accepted"],
+                    )
+        except Exception:
+            logger.warning("AsyncDynamicKeyManager: stats report HTTP request failed", exc_info=True)
 
     # ── Async refresh logic ──────────────────────────────────────────
 

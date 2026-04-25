@@ -22,6 +22,6 @@ except Exception as e:  # pragma: no cover
     pass
 
 try:
-    from .client import connect, login, get_keys, async_connect, alogin, aget_keys, get_config, aget_config, PoolConfig
+    from .client import connect, login, get_keys, async_connect, alogin, aget_keys, get_config, aget_config, PoolConfig, connect_with_stats, async_connect_with_stats
 except Exception:  # pragma: no cover
     pass

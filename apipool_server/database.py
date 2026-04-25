@@ -4,8 +4,10 @@
 """Database connection and session management."""
 
 import logging
+import os
+from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from .config import get_settings
@@ -14,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 _engine = None
 _SessionLocal = None
+
+# Per-pool stats engine cache: (user_id, pool_identifier) -> engine
+_stats_engines: dict[tuple[int, str], object] = {}
 
 Base = declarative_base()
 
@@ -55,6 +60,19 @@ _NEW_TABLES = [
         is_revoked BOOLEAN DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         revoked_at DATETIME,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS client_call_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        pool_identifier VARCHAR(64) NOT NULL,
+        key_identifier VARCHAR(128) NOT NULL,
+        status VARCHAR(16) NOT NULL,
+        latency FLOAT,
+        method VARCHAR(128),
+        finished_at DATETIME NOT NULL,
+        reported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        client_id VARCHAR(64),
         FOREIGN KEY (user_id) REFERENCES users(id)
     )""",
 ]
@@ -125,3 +143,66 @@ def init_db():
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
     _run_migrations(engine)
+
+    # Ensure stats DB directory exists
+    settings = get_settings()
+    os.makedirs(settings.STATS_DB_DIR, exist_ok=True)
+
+
+def get_stats_engine(user_id: int, pool_identifier: str):
+    """Get or create a persistent SQLAlchemy engine for per-pool stats.
+
+    Each pool gets its own SQLite file under STATS_DB_DIR/{user_id}/{pool_identifier}.db.
+    Engines are cached to avoid repeated creation.
+    """
+    key = (user_id, pool_identifier)
+    if key in _stats_engines:
+        return _stats_engines[key]
+
+    settings = get_settings()
+    db_dir = Path(settings.STATS_DB_DIR) / str(user_id)
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / f"{pool_identifier}.db"
+    db_url = f"sqlite:///{db_path}"
+
+    engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        echo=settings.DEBUG,
+    )
+
+    # Enable WAL journal mode for better concurrent write performance
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
+    _stats_engines[key] = engine
+    logger.info("Created stats engine for pool %s (user %s) at %s", pool_identifier, user_id, db_path)
+    return engine
+
+
+def remove_stats_engine(user_id: int, pool_identifier: str):
+    """Dispose and remove the stats engine for a pool, and delete the DB file.
+
+    Called when a pool is deleted to clean up resources.
+    """
+    import os
+    key = (user_id, pool_identifier)
+    engine = _stats_engines.pop(key, None)
+    if engine is not None:
+        engine.dispose()
+        logger.info("Disposed stats engine for pool %s (user %s)", pool_identifier, user_id)
+
+    # Delete the stats DB file
+    settings = get_settings()
+    db_path = Path(settings.STATS_DB_DIR) / str(user_id) / f"{pool_identifier}.db"
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass

@@ -498,3 +498,124 @@ async def aget_config(
         resp = await client.get(f"/api/v1/pools/{pool_identifier}/config")
         resp.raise_for_status()
         return PoolConfig.from_server_response(resp.json())
+
+
+# ── Convenience: connect with stats reporting ───────────────────────
+
+def connect_with_stats(
+    service_url: str,
+    pool_identifier: str,
+    auth_token: str,
+    refresh_interval: float = 60.0,
+    stats_report_interval: float = 30.0,
+) -> "DynamicKeyManager":
+    """Connect to an apipool service with stats reporting enabled.
+
+    Creates a DynamicKeyManager that:
+    - Periodically fetches keys from the server
+    - Periodically reports API call statistics back to the server
+    - Uses file-based SQLite for persistent local stats
+
+    Args:
+        service_url: Base URL of the apipool server
+        pool_identifier: The pool identifier to use
+        auth_token: JWT access token for authentication
+        refresh_interval: Seconds between key refreshes
+        stats_report_interval: Seconds between stats reports
+
+    Returns:
+        DynamicKeyManager with stats reporting configured.
+
+    Example::
+
+        from apipool import connect_with_stats, login
+
+        tokens = login("http://localhost:8000", "alice", "password")
+        manager = connect_with_stats(
+            service_url="http://localhost:8000",
+            pool_identifier="my-pool",
+            auth_token=tokens["access_token"],
+        )
+        result = manager.dummyclient.ping()
+        manager.shutdown()
+    """
+    from .manager import DynamicKeyManager
+
+    return DynamicKeyManager(
+        key_fetcher=lambda: get_keys(service_url, pool_identifier, auth_token),
+        api_key_factory=lambda raw_key: _GenericApiKey(raw_key),
+        refresh_interval=refresh_interval,
+        config_fetcher=lambda: get_config(service_url, pool_identifier, auth_token),
+        pool_identifier=pool_identifier,
+        stats_report_url=service_url,
+        stats_report_token=auth_token,
+        stats_report_interval=stats_report_interval,
+    )
+
+
+class _GenericApiKey(ApiKey):
+    """Minimal ApiKey subclass that stores the raw key as primary_key."""
+
+    def __init__(self, raw_key: str):
+        self._raw_key = raw_key
+
+    def get_primary_key(self):
+        return self._raw_key
+
+    def create_client(self):
+        return _GenericClient()
+
+    def test_usability(self, client):
+        return True
+
+
+class _GenericClient:
+    """Placeholder client for _GenericApiKey — actual API calls go through
+    the service proxy or are handled by user-provided client classes."""
+
+    def __getattr__(self, item):
+        raise AttributeError(
+            f"_GenericClient does not implement '{item}'. "
+            "Provide your own api_key_factory with a real client class, "
+            "or use connect() for server-proxied calls."
+        )
+
+
+async def async_connect_with_stats(
+    service_url: str,
+    pool_identifier: str,
+    auth_token: str,
+    refresh_interval: float = 60.0,
+    stats_report_interval: float = 30.0,
+) -> "AsyncDynamicKeyManager":
+    """Async version of connect_with_stats.
+
+    Creates an AsyncDynamicKeyManager with stats reporting enabled.
+
+    Example::
+
+        from apipool import async_connect_with_stats, alogin
+
+        tokens = await alogin("http://localhost:8000", "alice", "password")
+        manager = await async_connect_with_stats(
+            service_url="http://localhost:8000",
+            pool_identifier="my-pool",
+            auth_token=tokens["access_token"],
+        )
+        result = await manager.adummyclient.ping()
+        await manager.ashutdown()
+    """
+    from .manager import AsyncDynamicKeyManager
+
+    manager = AsyncDynamicKeyManager(
+        key_fetcher=lambda: aget_keys(service_url, pool_identifier, auth_token),
+        api_key_factory=lambda raw_key: _GenericApiKey(raw_key),
+        refresh_interval=refresh_interval,
+        config_fetcher=lambda: aget_config(service_url, pool_identifier, auth_token),
+        pool_identifier=pool_identifier,
+        stats_report_url=service_url,
+        stats_report_token=auth_token,
+        stats_report_interval=stats_report_interval,
+    )
+    await manager.astart()
+    return manager

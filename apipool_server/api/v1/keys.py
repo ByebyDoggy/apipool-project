@@ -5,6 +5,7 @@
 
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from ...database import get_db
@@ -13,9 +14,12 @@ from ...schemas.api_key import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, ApiKeyRotateRequest,
     ApiKeyResponse, ApiKeyVerifyResponse, BatchImportRequest, BatchImportResponse,
     RawKeyListResponse, SingleRawKeyResponse,
+    KeyExportResponse, KeyImportRequest, KeyImportResponse,
 )
 from ...schemas.common import PageResponse
+from ...schemas.stats import KeyStatsResponse
 from ...services.key_service import KeyService
+from ...services.stats_service import StatsService
 from .auth import get_current_user
 
 router = APIRouter(prefix="/keys", tags=["API Keys"])
@@ -62,6 +66,51 @@ def get_raw_keys(
     return service.get_raw_keys(user, pool_identifier)
 
 
+# NOTE: /export and /import MUST be defined before /{identifier}
+# otherwise "export"/"import" would be captured as identifier values
+@router.get("/export")
+def export_keys(
+    pool_id: Optional[int] = Query(None, description="Filter by pool membership (pool ID)"),
+    is_active: Optional[bool] = Query(None),
+    tag: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, description="Search by identifier or alias"),
+    verification_status: Optional[str] = Query(None, description="Filter by verification status"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Export API Keys as CSV file.
+
+    Returns decrypted raw keys for the current user with optional filters.
+    Use this to backup or migrate your keys.
+    """
+    service = KeyService(db)
+    result = service.export_keys(user, pool_id, is_active, tag, search, verification_status)
+    return Response(
+        content=result.csv_text,
+        media_type='text/csv; charset=utf-8',
+        headers={
+            'Content-Disposition': f'attachment; filename="{result.filename}"',
+        },
+    )
+
+
+@router.post("/import", response_model=KeyImportResponse)
+def import_keys(req: KeyImportRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Import API Keys from JSON.
+
+    Keys with duplicate identifiers are skipped.
+    """
+    service = KeyService(db)
+    return service.import_keys(user, req)
+
+
+@router.post("/batch-import", response_model=BatchImportResponse)
+def batch_import(req: BatchImportRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Batch import API Keys."""
+    service = KeyService(db)
+    return service.batch_import(user, req)
+
+
 @router.get("/{identifier}", response_model=ApiKeyResponse)
 def get_key(identifier: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get details of a specific API Key."""
@@ -105,8 +154,13 @@ def verify_key(identifier: str, user: User = Depends(get_current_user), db: Sess
     return service.verify(user, identifier)
 
 
-@router.post("/batch-import", response_model=BatchImportResponse)
-def batch_import(req: BatchImportRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Batch import API Keys."""
-    service = KeyService(db)
-    return service.batch_import(user, req)
+@router.get("/{identifier}/stats", response_model=KeyStatsResponse)
+def get_key_stats(
+    identifier: str,
+    seconds: int = Query(86400, ge=1, description="Time window in seconds (default 24h)"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get success rate statistics for a specific API Key across all its pools."""
+    service = StatsService(db)
+    return service.get_key_stats(user, identifier, seconds)

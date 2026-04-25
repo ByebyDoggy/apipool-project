@@ -53,6 +53,42 @@ export interface BatchImportResponse {
   total: number
 }
 
+export interface KeyExportItem {
+  identifier: string
+  alias: string | null
+  raw_key: string
+  tags: string[] | null
+  description: string | null
+  is_active: boolean
+}
+
+export interface KeyExportResponse {
+  exported_at: string
+  total: number
+  keys: KeyExportItem[]
+}
+
+export interface KeyImportItem {
+  identifier: string
+  alias?: string
+  raw_key: string
+  tags?: string[]
+  description?: string
+  is_active?: boolean
+}
+
+export interface KeyImportRequest {
+  keys: KeyImportItem[]
+}
+
+export interface KeyImportResponse {
+  task_id: string
+  status: string
+  total: number
+  imported: number
+  skipped: number
+}
+
 export interface PageResponse<T> {
   items: T[]
   total: number
@@ -115,4 +151,20 @@ export function getRawKey(identifier: string) {
 
 export function batchImport(data: BatchImportRequest) {
   return http.post<BatchImportResponse>('/keys/batch-import', data)
+}
+
+export interface KeyExportParams {
+  pool_id?: number
+  is_active?: boolean
+  tag?: string
+  search?: string
+  verification_status?: string
+}
+
+export function exportKeys(params?: KeyExportParams) {
+  return http.get<Blob>('/keys/export', { params, responseType: 'blob' })
+}
+
+export function importKeys(data: KeyImportRequest) {
+  return http.post<KeyImportResponse>('/keys/import', data)
 }

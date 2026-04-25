@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
 
+    # Stats DB directory (per-pool SQLite files for call statistics)
+    STATS_DB_DIR: str = "data/stats"
+
     # Rate limiting
     RATE_LIMIT_PER_USER_PER_MINUTE: int = 60
     RATE_LIMIT_PROXY_PER_POOL_PER_MINUTE: int = 30

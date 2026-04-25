@@ -13,10 +13,14 @@ from ..models.api_key_entry import ApiKeyEntry
 from ..models.key_pool import PoolMember, KeyPool
 from ..models.user import User
 from ..security import KeyEncryption
+import csv
+import io
+
 from ..schemas.api_key import (
     ApiKeyCreateRequest, ApiKeyUpdateRequest, ApiKeyRotateRequest,
     ApiKeyResponse, ApiKeyVerifyResponse, BatchImportRequest, BatchImportResponse,
     RawKeyItem, RawKeyListResponse, SingleRawKeyResponse,
+    KeyExportItem, KeyExportResponse, KeyImportRequest, KeyImportResponse,
 )
 from cryptography.fernet import InvalidToken
 
@@ -274,6 +278,117 @@ class KeyService:
             task_id=f"batch-import-{int(datetime.now().timestamp())}",
             status="completed",
             total=imported,
+        )
+
+    def export_keys(
+        self, user: User,
+        pool_id: Optional[int] = None,
+        is_active: Optional[bool] = None,
+        tag: Optional[str] = None,
+        search: Optional[str] = None,
+        verification_status: Optional[str] = None,
+    ) -> KeyExportResponse:
+        """Export decrypted keys for the user with optional filters as CSV.
+
+        Returns a CSV string containing all matching keys with their raw values.
+        CSV columns: identifier, alias, raw_key, tags, description, is_active
+        """
+        # Reuse the same filtering logic as list_keys
+        query = self.db.query(ApiKeyEntry).filter(
+            and_(ApiKeyEntry.user_id == user.id, ApiKeyEntry.is_archived == False)
+        )
+
+        if pool_id:
+            key_ids = self.db.query(PoolMember.key_id).filter(
+                PoolMember.pool_id == pool_id
+            ).subquery()
+            query = query.filter(ApiKeyEntry.id.in_(key_ids))
+        if is_active is not None:
+            query = query.filter(ApiKeyEntry.is_active == is_active)
+        if tag:
+            query = query.filter(ApiKeyEntry.tags.contains([tag]))
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                (ApiKeyEntry.identifier.ilike(pattern)) | (ApiKeyEntry.alias.ilike(pattern))
+            )
+        if verification_status:
+            query = query.filter(ApiKeyEntry.verification_status == verification_status)
+
+        entries = query.order_by(ApiKeyEntry.created_at.desc()).all()
+
+        # Build CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        # Header row with Chinese column names for readability
+        writer.writerow(['标识符', '别名', '密钥', '标签', '描述', '状态'])
+
+        for entry in entries:
+            try:
+                raw_key = KeyEncryption.decrypt(entry.encrypted_key)
+            except InvalidToken:
+                raw_key = '[解密失败]'
+            tags_str = ','.join(entry.tags) if entry.tags else ''
+            writer.writerow([
+                entry.identifier,
+                entry.alias or '',
+                raw_key,
+                tags_str,
+                entry.description or '',
+                '启用' if entry.is_active else '停用',
+            ])
+
+        csv_text = output.getvalue()
+        filename = f'apikeys-export-{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+
+        return KeyExportResponse(
+            filename=filename,
+            csv_text=csv_text,
+            total=len(entries),
+        )
+
+    def import_keys(self, user: User, req: KeyImportRequest) -> KeyImportResponse:
+        """Import keys from an export file.
+
+        Skips keys whose identifier already exists.
+        """
+        imported = 0
+        skipped = 0
+        task_id = f"key-import-{int(datetime.now().timestamp())}"
+
+        for key_item in req.keys:
+            # Check if identifier already exists
+            existing = self.db.query(ApiKeyEntry).filter(
+                and_(
+                    ApiKeyEntry.identifier == key_item.identifier,
+                    ApiKeyEntry.user_id == user.id,
+                )
+            ).first()
+            if existing:
+                skipped += 1
+                continue
+
+            encrypted_key = KeyEncryption.encrypt(key_item.raw_key)
+            entry = ApiKeyEntry(
+                user_id=user.id,
+                identifier=key_item.identifier,
+                alias=key_item.alias,
+                encrypted_key=encrypted_key,
+                tags=key_item.tags,
+                description=key_item.description,
+                is_active=key_item.is_active,
+            )
+            self.db.add(entry)
+            imported += 1
+
+        self.db.commit()
+
+        return KeyImportResponse(
+            task_id=task_id,
+            status="completed",
+            total=len(req.keys),
+            imported=imported,
+            skipped=skipped,
         )
 
     def _get_entry(self, user: User, identifier: str) -> ApiKeyEntry:

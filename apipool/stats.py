@@ -9,8 +9,8 @@ API Call所使用的api key, 返回的状态 以及 完成API Call的时间.
 from datetime import datetime, timedelta
 from collections import OrderedDict
 
-from sqlalchemy import Column, ForeignKey, create_engine
-from sqlalchemy import String, Integer, DateTime, func
+from sqlalchemy import Column, ForeignKey, create_engine, text, inspect
+from sqlalchemy import String, Integer, Float, DateTime, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
@@ -46,6 +46,8 @@ class Event(Base):
     apikey_id = Column(Integer, ForeignKey("apikey.id"), primary_key=True)
     finished_at = Column(DateTime, primary_key=True)
     status_id = Column(Integer, ForeignKey("status.id"))
+    latency = Column(Float, nullable=True)
+    method = Column(String(128), nullable=True)
 
     apikey = relationship("ApiKey")
     status = relationship("Status")
@@ -109,9 +111,11 @@ class StatsCollector(object):
         self.ses = self.create_session()
 
         self._add_all_status()
+        self._migrate_event_table()
 
         self._cache_apikey = dict()
         self._cache_status = StatusCollection.get_mapper_id_to_description()
+        self._update_cache()
 
     def create_session(self):
         return sessionmaker(bind=self.engine)()
@@ -160,11 +164,13 @@ class StatsCollector(object):
             self._cache_apikey.setdefault(apikey.key, apikey.id)
         ses.close()
 
-    def add_event(self, primary_key, status_id):
+    def add_event(self, primary_key, status_id, latency=None, method=None):
         event = Event(
             apikey_id=self._cache_apikey[primary_key],
             finished_at=datetime.now(),
             status_id=status_id,
+            latency=latency,
+            method=method,
         )
         ses = self.create_session()
         ses.add(event)
@@ -202,3 +208,84 @@ class StatsCollector(object):
             .group_by(Event.apikey_id) \
             .order_by(ApiKey.key)
         return OrderedDict(q.all())
+
+    # ── Migration for new columns ──────────────────────────────────────
+
+    def _migrate_event_table(self):
+        """Add latency and method columns to existing Event table."""
+        try:
+            inspector = inspect(self.engine)
+        except Exception:
+            return
+        if "event" not in inspector.get_table_names():
+            return
+        columns = {col["name"] for col in inspector.get_columns("event")}
+        if "latency" not in columns:
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE event ADD COLUMN latency FLOAT"))
+            except Exception:
+                pass
+        if "method" not in columns:
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE event ADD COLUMN method VARCHAR(128)"))
+            except Exception:
+                pass
+
+    # ── Batch fetch and delete for stats reporting ─────────────────────
+
+    @property
+    def _apikey_id_to_key(self):
+        """Reverse mapping: apikey_id -> primary_key string."""
+        return {v: k for k, v in self._cache_apikey.items()}
+
+    def fetch_events_batch(self, limit=500):
+        """Fetch a batch of events for reporting, ordered by finished_at.
+
+        Returns a list of dicts with keys:
+            key_identifier, status_id, latency, method, finished_at,
+            _apikey_id, _finished_at (for deletion)
+        """
+        ses = self.create_session()
+        events = (
+            ses.query(Event)
+            .order_by(Event.finished_at.asc())
+            .limit(limit)
+            .all()
+        )
+        id_to_key = self._apikey_id_to_key
+        result = []
+        for evt in events:
+            result.append({
+                "key_identifier": id_to_key.get(evt.apikey_id, ""),
+                "status_id": evt.status_id,
+                "latency": evt.latency,
+                "method": evt.method,
+                "finished_at": evt.finished_at,
+                "_apikey_id": evt.apikey_id,
+                "_finished_at": evt.finished_at,
+            })
+        ses.close()
+        return result
+
+    def delete_events(self, events_to_delete):
+        """Delete reported events from local DB by their composite primary key.
+
+        Args:
+            events_to_delete: list of dicts as returned by fetch_events_batch
+        """
+        if not events_to_delete:
+            return
+        ses = self.create_session()
+        try:
+            for evt in events_to_delete:
+                ses.query(Event).filter(
+                    Event.apikey_id == evt["_apikey_id"],
+                    Event.finished_at == evt["_finished_at"],
+                ).delete()
+            ses.commit()
+        except Exception:
+            ses.rollback()
+        finally:
+            ses.close()

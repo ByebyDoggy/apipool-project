@@ -102,7 +102,7 @@ curl -X POST http://localhost:8000/api/v1/proxy/my-pool/call \
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { listPools } from '@/api/pools'
-import { getUsageStats, type StatsUsageResponse } from '@/api/stats'
+import { getSuccessRate } from '@/api/stats'
 
 const stats = ref({
   total_calls: 0,
@@ -114,12 +114,10 @@ const stats = ref({
 
 async function loadStats() {
   try {
-    // First get all pools
     const poolsRes = await listPools({ page: 1, page_size: 100 })
     const pools = poolsRes.data.items
     stats.value.active_pools = pools.filter(p => p.is_active).length
 
-    // Aggregate usage stats from each pool
     let totalCalls = 0
     let successCalls = 0
     let failedCalls = 0
@@ -127,12 +125,12 @@ async function loadStats() {
 
     for (const pool of pools) {
       try {
-        const res = await getUsageStats(pool.identifier, { seconds: 86400 })
-        const summary = res.data.summary || {}
-        totalCalls += summary.total || 0
-        successCalls += summary.success || 0
-        failedCalls += summary.failed || 0
-        activeKeys += (res.data.by_key ? Object.keys(res.data.by_key).length : 0)
+        const res = await getSuccessRate(pool.identifier, { seconds: 86400 })
+        const summary = res.data.summary
+        totalCalls += summary.total_calls
+        successCalls += summary.success_count
+        failedCalls += summary.failed_count
+        activeKeys += res.data.by_key.length
       } catch {
         // Individual pool stats may fail, skip
       }

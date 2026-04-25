@@ -17,6 +17,9 @@ if a single API key has 1000/day quota, you can register 10 API keys and let
   calls through it, with transparent key rotation and zero local key material.
 - **Dynamic scaling** — `DynamicKeyManager` auto-refreshes keys from server,
   expanding or shrinking the pool in real time.
+- **Stats reporting** — `DynamicKeyManager` automatically reports local API call
+  statistics (including latency and method) to `apipool-server`, giving server-side
+  dashboards full visibility into SDK-mode usage.
 - Lightweight dependencies — `sqlalchemy` + `httpx`.
 
 ## Installation
@@ -147,6 +150,7 @@ except PoolExhaustedError:
 | Authenticate | `login(service_url, username, password)` | `await alogin(...)` |
 | Connect to pool | `connect(service_url, pool_identifier, auth_token)` | `await async_connect(...)` |
 | Fetch raw keys | `get_keys(service_url, pool_identifier, auth_token)` | `await aget_keys(...)` |
+| Connect with stats | `connect_with_stats(service_url, pool_identifier, auth_token)` | `await async_connect_with_stats(...)` |
 
 Async example:
 
@@ -241,6 +245,11 @@ await manager.ashutdown()
 | `on_keys_added` | `Callable[[list[str]], None]` | Callback after keys are added |
 | `on_keys_removed` | `Callable[[list[str]], None]` | Callback after keys are removed |
 | `config_fetcher` | `Callable[[], PoolConfig]` | Returns pool config from server (optional) |
+| `pool_identifier` | `str` | Pool name used for SQLite file and stats reporting |
+| `stats_report_url` | `str` | Server URL for stats reporting (optional) |
+| `stats_report_token` | `str` | Auth token for stats reporting (optional) |
+| `stats_report_interval` | `float` | Seconds between stats reports (default 30) |
+| `stats_report_batch_size` | `int` | Max events per report batch (default 500) |
 
 ## Configuration Sync
 
@@ -473,6 +482,112 @@ count = manager.stats.usage_count_in_recent_n_seconds(
 )
 ```
 
+### Enhanced Event Fields
+
+Every API call now records two additional fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `latency` | `float \| None` | Wall-clock seconds for the call |
+| `method` | `str \| None` | Attribute chain, e.g. `"coins.simple.price.get"` |
+
+These are recorded automatically by `ApiCaller` / `AsyncApiCaller`.  When using
+`dummyclient` / `adummyclient` the `method` is derived from the attribute chain;
+for `check_usable()` the method is `"check_usable"`.
+
+### Stats Reporting (SDK Mode)
+
+In SDK mode, API calls happen locally and the server has no visibility into them.
+`DynamicKeyManager` can automatically report local call statistics back to the
+server so that the dashboard shows the complete picture.
+
+#### `connect_with_stats` / `async_connect_with_stats`
+
+One-line setup with stats reporting:
+
+```python
+from apipool import connect_with_stats, login
+
+tokens = login("http://localhost:8000", "alice", "password")
+
+manager = connect_with_stats(
+    service_url="http://localhost:8000",
+    pool_identifier="coingecko",
+    auth_token=tokens["access_token"],
+    refresh_interval=120,
+    stats_report_interval=30,
+)
+
+# Use like a normal manager — stats are reported in the background
+result = manager.dummyclient.ping()
+
+# Graceful shutdown (also flushes pending stats)
+manager.shutdown()
+```
+
+Async version:
+
+```python
+from apipool import async_connect_with_stats, alogin
+
+tokens = await alogin("http://localhost:8000", "alice", "password")
+manager = await async_connect_with_stats(
+    service_url="http://localhost:8000",
+    pool_identifier="coingecko",
+    auth_token=tokens["access_token"],
+)
+result = await manager.adummyclient.coins.simple.price.get(ids="bitcoin")
+await manager.ashutdown()
+```
+
+#### How It Works
+
+```
+Client (DynamicKeyManager)                 Server (apipool-server)
+       |                                         |
+       |  1. API call (via ApiCaller)            |
+       |  → stats.add_event(key, status,         |
+       |     latency, method)                    |
+       |  → write to local SQLite                |
+       |                                         |
+       |  ======== Background thread ========    |
+       |                                         |
+       |  2. Periodic (every 30s)                |
+       |  → stats.fetch_events_batch(500)        |
+       |                                         |
+       |  3. POST /api/v1/stats/report           |
+       |  ───────────────────────────────────>   |
+       |    {pool_identifier, client_id,          |
+       |     events: [{key, status, latency,     |
+       |     method, finished_at}]}              |
+       |                                         |  4. Write to client_call_logs
+       |                                         |
+       |  5. 200 {accepted: N}                   |
+       | <───────────────────────────────────    |
+       |                                         |
+       |  6. stats.delete_events(reported)       |
+       |  → remove reported events from local DB |
+```
+
+#### Report Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `stats_report_url` | `None` (disabled) | Server base URL for reporting |
+| `stats_report_token` | `None` | JWT token for the report endpoint |
+| `stats_report_interval` | `30.0` | Seconds between reports |
+| `stats_report_batch_size` | `500` | Max events per HTTP request |
+
+When `stats_report_url` is not set, stats reporting is completely disabled and
+behavior is identical to previous versions.
+
+#### Local SQLite Persistence
+
+When `pool_identifier` is provided, `DynamicKeyManager` stores stats in a
+file-based SQLite database (`<temp>/apipool_stats/<pool_identifier>.db`) instead
+of an in-memory database. This ensures statistics survive process restarts and
+are available for reporting.
+
 ## API Reference
 
 ### Exported Symbols
@@ -506,12 +621,14 @@ from apipool import (
     login,
     get_keys,
     get_config,
+    connect_with_stats,
 
     # Server SDK mode — async
     async_connect,
     alogin,
     aget_keys,
     aget_config,
+    async_connect_with_stats,
 )
 ```
 

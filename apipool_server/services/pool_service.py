@@ -120,6 +120,10 @@ class PoolService:
         self.db.delete(pool)
         self.db.commit()
 
+        # Clean up per-pool stats DB file
+        from ..database import remove_stats_engine
+        remove_stats_engine(user.id, identifier)
+
     def add_members(self, user: User, identifier: str, req: PoolAddMembersRequest) -> PoolResponse:
         pool = self._get_pool(user, identifier)
 
@@ -234,10 +238,15 @@ class PoolService:
         # Resolve reach_limit_exception
         reach_limit_exc = self._resolve_exception(pool.reach_limit_exception)
 
+        # Get persistent stats engine for this pool
+        from ..database import get_stats_engine
+        stats_engine = get_stats_engine(user_id, pool_identifier)
+
         # Build the ApiKeyManager — same core object as the library mode
         manager = ApiKeyManager(
             apikey_list=apikey_list,
             reach_limit_exc=reach_limit_exc,
+            db_engine=stats_engine,
         )
 
         return manager

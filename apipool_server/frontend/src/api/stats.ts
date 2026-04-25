@@ -1,42 +1,78 @@
 import http from './index'
 
-export interface StatsUsageResponse {
+// ── Types ────────────────────────────────────────────────────────────────
+
+export interface KeySuccessRateItem {
+  key_identifier: string
+  alias: string | null
+  total_calls: number
+  success_count: number
+  failed_count: number
+  reach_limit_count: number
+  success_rate: number
+}
+
+export interface SuccessRateResponse {
   pool_identifier: string
   period_seconds: number
-  summary: Record<string, number>
-  by_key: Record<string, Record<string, number>> | null
+  summary: KeySuccessRateItem
+  by_key: KeySuccessRateItem[]
 }
 
-export interface StatsTimelineResponse {
+export interface CallLogItem {
+  id: number
+  key_identifier: string
+  alias: string | null
+  status: string
+  finished_at: string
+}
+
+export interface CallLogResponse {
   pool_identifier: string
   period_seconds: number
-  interval: string
-  data: Record<string, any>[]
+  items: CallLogItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
-export interface UsageParams {
+export interface KeyStatsResponse {
+  key_identifier: string
+  alias: string | null
+  period_seconds: number
+  total_calls: number
+  success_count: number
+  failed_count: number
+  reach_limit_count: number
+  success_rate: number
+}
+
+export interface SuccessRateParams {
   seconds?: number
-  group_by?: string  // 'key' | 'status' | 'hour'
-  status?: string    // 'success' | 'failed' | 'reach_limit'
 }
 
-export interface TimelineParams {
+export interface CallLogParams {
   seconds?: number
-  interval?: string  // 'minute' | 'hour' | 'day'
+  key_identifier?: string
+  status?: 'success' | 'failed' | 'reach_limit'
+  page?: number
+  page_size?: number
 }
 
-/**
- * Get usage statistics for a pool.
- * Backend: GET /api/v1/stats/{pool_identifier}/usage
- */
-export function getUsageStats(poolIdentifier: string, params?: UsageParams) {
-  return http.get<StatsUsageResponse>(`/stats/${poolIdentifier}/usage`, { params })
+export interface KeyStatsParams {
+  seconds?: number
 }
 
-/**
- * Get usage timeline for a pool.
- * Backend: GET /api/v1/stats/{pool_identifier}/timeline
- */
-export function getTimeline(poolIdentifier: string, params?: TimelineParams) {
-  return http.get<StatsTimelineResponse>(`/stats/${poolIdentifier}/timeline`, { params })
+// ── API Functions ────────────────────────────────────────────────────────
+
+export function getSuccessRate(poolIdentifier: string, params?: SuccessRateParams) {
+  return http.get<SuccessRateResponse>(`/stats/${poolIdentifier}/success-rate`, { params })
+}
+
+export function getCallLogs(poolIdentifier: string, params?: CallLogParams) {
+  return http.get<CallLogResponse>(`/stats/${poolIdentifier}/logs`, { params })
+}
+
+export function getKeyStats(keyIdentifier: string, params?: KeyStatsParams) {
+  return http.get<KeyStatsResponse>(`/keys/${keyIdentifier}/stats`, { params })
 }

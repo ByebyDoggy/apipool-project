@@ -258,6 +258,156 @@ result = manager.dummyclient.some_method()</code></pre>
               <t-empty v-else description="暂无配置数据" />
             </t-loading>
           </t-tab-panel>
+
+          <!-- Tab 4: Success Rate -->
+          <t-tab-panel value="stats" label="调用统计">
+            <div style="margin-top: 16px">
+              <div class="stats-toolbar">
+                <t-select v-model="statsPeriod" style="width: 160px" @change="loadSuccessRate">
+                  <t-option :value="3600" label="最近 1 小时" />
+                  <t-option :value="21600" label="最近 6 小时" />
+                  <t-option :value="86400" label="最近 24 小时" />
+                  <t-option :value="604800" label="最近 7 天" />
+                  <t-option :value="2592000" label="最近 30 天" />
+                </t-select>
+                <t-button variant="outline" @click="loadSuccessRate">
+                  <t-icon name="refresh" style="margin-right: 4px" /> 刷新
+                </t-button>
+              </div>
+
+              <t-loading :loading="statsLoading">
+                <template v-if="successRateData">
+                  <!-- Overview cards -->
+                  <t-row :gutter="16" style="margin-bottom: 24px">
+                    <t-col :span="3">
+                      <div class="stat-card">
+                        <div class="stat-card-title">总调用</div>
+                        <div class="stat-card-value">{{ successRateData.summary.total_calls }}</div>
+                      </div>
+                    </t-col>
+                    <t-col :span="3">
+                      <div class="stat-card stat-card-success">
+                        <div class="stat-card-title">成功</div>
+                        <div class="stat-card-value">{{ successRateData.summary.success_count }}</div>
+                      </div>
+                    </t-col>
+                    <t-col :span="3">
+                      <div class="stat-card stat-card-danger">
+                        <div class="stat-card-title">失败</div>
+                        <div class="stat-card-value">{{ successRateData.summary.failed_count }}</div>
+                      </div>
+                    </t-col>
+                    <t-col :span="3">
+                      <div class="stat-card stat-card-warning">
+                        <div class="stat-card-title">限速</div>
+                        <div class="stat-card-value">{{ successRateData.summary.reach_limit_count }}</div>
+                      </div>
+                    </t-col>
+                  </t-row>
+
+                  <!-- Pool success rate progress -->
+                  <div style="margin-bottom: 24px">
+                    <div style="display: flex; align-items: center; margin-bottom: 8px">
+                      <span style="font-weight: 600; margin-right: 12px">池整体成功率</span>
+                      <t-progress
+                        :percentage="successRateData.summary.success_rate"
+                        :status="successRateData.summary.success_rate >= 80 ? 'success' : successRateData.summary.success_rate >= 50 ? 'warning' : 'error'"
+                        :label="`${successRateData.summary.success_rate}%`"
+                        style="flex: 1"
+                      />
+                    </div>
+                  </div>
+
+                  <!-- Per-key breakdown -->
+                  <h4 class="section-title">Key 成功率明细</h4>
+                  <t-table
+                    :data="successRateData.by_key"
+                    :columns="statsColumns"
+                    row-key="key_identifier"
+                    hover
+                    stripe
+                    size="small"
+                  >
+                    <template #success_rate="{ row }">
+                      <t-progress
+                        :percentage="row.success_rate"
+                        :status="row.success_rate >= 80 ? 'success' : row.success_rate >= 50 ? 'warning' : 'error'"
+                        :label="`${row.success_rate}%`"
+                        size="small"
+                        style="width: 120px"
+                      />
+                    </template>
+                  </t-table>
+                </template>
+                <t-empty v-else description="暂无调用统计数据" />
+              </t-loading>
+            </div>
+          </t-tab-panel>
+
+          <!-- Tab 5: Call Logs -->
+          <t-tab-panel value="logs" label="调用日志">
+            <div style="margin-top: 16px">
+              <div class="stats-toolbar">
+                <t-select v-model="logsPeriod" style="width: 140px" @change="loadCallLogs">
+                  <t-option :value="3600" label="1 小时" />
+                  <t-option :value="21600" label="6 小时" />
+                  <t-option :value="86400" label="24 小时" />
+                  <t-option :value="604800" label="7 天" />
+                  <t-option :value="2592000" label="30 天" />
+                </t-select>
+                <t-select
+                  v-model="logsKeyFilter"
+                  placeholder="筛选 Key"
+                  clearable
+                  filterable
+                  style="width: 200px"
+                  @change="loadCallLogs"
+                >
+                  <t-option v-for="m in (pool?.members || [])" :key="m.key_identifier" :value="m.key_identifier" :label="m.key_identifier" />
+                </t-select>
+                <t-select v-model="logsStatusFilter" placeholder="状态" clearable style="width: 120px" @change="loadCallLogs">
+                  <t-option value="success" label="成功" />
+                  <t-option value="failed" label="失败" />
+                  <t-option value="reach_limit" label="限速" />
+                </t-select>
+                <t-button variant="outline" @click="loadCallLogs">
+                  <t-icon name="refresh" style="margin-right: 4px" /> 刷新
+                </t-button>
+              </div>
+
+              <t-loading :loading="logsLoading">
+                <t-table
+                  v-if="callLogData"
+                  :data="callLogData.items"
+                  :columns="logColumns"
+                  row-key="id"
+                  hover
+                  stripe
+                  size="small"
+                >
+                  <template #status="{ row }">
+                    <t-tag
+                      :theme="logStatusTheme(row.status)"
+                      variant="light"
+                      size="small"
+                    >
+                      {{ logStatusLabel(row.status) }}
+                    </t-tag>
+                  </template>
+                </t-table>
+                <t-empty v-else description="暂无调用日志" />
+                <div v-if="callLogData && callLogData.total > 0" style="margin-top: 12px; display: flex; justify-content: flex-end">
+                  <t-pagination
+                    v-model:current="logsPage"
+                    :total="callLogData.total"
+                    :page-size="logsPageSize"
+                    show-jumper
+                    @change="loadCallLogs"
+                  />
+                </div>
+              </t-loading>
+            </div>
+          </t-tab-panel>
         </t-tabs>
       </t-loading>
     </t-card>
@@ -285,6 +435,7 @@ import {
   type PoolResponse, type PoolMemberResponse, type PoolConfigResponse,
 } from '@/api/pools'
 import { listKeys, type ApiKeyResponse } from '@/api/keys'
+import { getSuccessRate, getCallLogs, type SuccessRateResponse, type CallLogResponse } from '@/api/stats'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { extractErrorMessage } from '@/api/errors'
 
@@ -340,7 +491,87 @@ watch(activeTab, (val) => {
   if (val === 'config' && !configData.value) {
     loadConfig()
   }
+  if (val === 'stats') {
+    loadSuccessRate()
+  }
+  if (val === 'logs') {
+    loadCallLogs()
+  }
 })
+
+// ── Stats state ──────────────────────────────────────────────────────────
+const statsLoading = ref(false)
+const successRateData = ref<SuccessRateResponse | null>(null)
+const statsPeriod = ref(86400)
+
+const statsColumns = [
+  { colKey: 'key_identifier', title: '标识符', width: 180, ellipsis: true },
+  { colKey: 'alias', title: '别名', width: 120, ellipsis: true },
+  { colKey: 'total_calls', title: '总调用', width: 80 },
+  { colKey: 'success_count', title: '成功', width: 80 },
+  { colKey: 'failed_count', title: '失败', width: 80 },
+  { colKey: 'reach_limit_count', title: '限速', width: 80 },
+  { colKey: 'success_rate', title: '成功率', width: 160, cell: 'success_rate' },
+]
+
+async function loadSuccessRate() {
+  statsLoading.value = true
+  try {
+    const res = await getSuccessRate(poolIdentifier, { seconds: statsPeriod.value })
+    successRateData.value = res.data
+  } catch {
+    MessagePlugin.error('加载调用统计失败')
+  } finally {
+    statsLoading.value = false
+  }
+}
+
+// ── Call logs state ──────────────────────────────────────────────────────
+const logsLoading = ref(false)
+const callLogData = ref<CallLogResponse | null>(null)
+const logsPeriod = ref(86400)
+const logsKeyFilter = ref<string | undefined>(undefined)
+const logsStatusFilter = ref<string | undefined>(undefined)
+const logsPage = ref(1)
+const logsPageSize = ref(20)
+
+const logColumns = [
+  { colKey: 'finished_at', title: '时间', width: 180 },
+  { colKey: 'key_identifier', title: 'Key 标识符', width: 180, ellipsis: true },
+  { colKey: 'alias', title: '别名', width: 120, ellipsis: true },
+  { colKey: 'status', title: '状态', width: 100, cell: 'status' },
+]
+
+function logStatusTheme(s: string) {
+  if (s === 'success') return 'success'
+  if (s === 'failed') return 'danger'
+  if (s === 'reach_limit') return 'warning'
+  return 'default'
+}
+
+function logStatusLabel(s: string) {
+  const map: Record<string, string> = { success: '成功', failed: '失败', reach_limit: '限速' }
+  return map[s] || s
+}
+
+async function loadCallLogs() {
+  logsLoading.value = true
+  try {
+    const params: Record<string, any> = {
+      seconds: logsPeriod.value,
+      page: logsPage.value,
+      page_size: logsPageSize.value,
+    }
+    if (logsKeyFilter.value) params.key_identifier = logsKeyFilter.value
+    if (logsStatusFilter.value) params.status = logsStatusFilter.value
+    const res = await getCallLogs(poolIdentifier, params)
+    callLogData.value = res.data
+  } catch {
+    MessagePlugin.error('加载调用日志失败')
+  } finally {
+    logsLoading.value = false
+  }
+}
 
 const memberColumns = [
   { colKey: 'key_identifier', title: '标识符', width: 180 },
@@ -576,5 +807,44 @@ onMounted(async () => {
   margin-top: 24px;
   padding-top: 16px;
   border-top: 1px solid var(--td-border-level-1-color);
+}
+
+.stats-toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+
+.stat-card {
+  background: var(--td-bg-color-container);
+  border: 1px solid var(--td-border-level-1-color);
+  border-radius: 6px;
+  padding: 12px 16px;
+  text-align: center;
+}
+
+.stat-card-title {
+  font-size: 12px;
+  color: var(--td-text-color-secondary);
+  margin-bottom: 4px;
+}
+
+.stat-card-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--td-text-color-primary);
+}
+
+.stat-card-success .stat-card-value {
+  color: var(--td-success-color);
+}
+
+.stat-card-danger .stat-card-value {
+  color: var(--td-error-color);
+}
+
+.stat-card-warning .stat-card-value {
+  color: var(--td-warning-color);
 }
 </style>

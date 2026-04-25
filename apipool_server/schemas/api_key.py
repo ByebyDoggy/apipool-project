@@ -88,3 +88,46 @@ class SingleRawKeyResponse(BaseModel):
     verification_status: str
     tags: list[str] | None = None
     created_at: datetime | None = None
+
+
+# --- Export / Import Schemas ---
+
+class KeyExportItem(BaseModel):
+    """A single key entry for export."""
+    identifier: str
+    alias: str | None = None
+    raw_key: str
+    tags: list[str] | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
+class KeyExportResponse(BaseModel):
+    """Response containing exported keys as CSV text."""
+    filename: str
+    csv_text: str
+    total: int
+
+
+class KeyImportItem(BaseModel):
+    """A single key entry for import."""
+    identifier: str = Field(..., min_length=1, max_length=128)
+    alias: str | None = None
+    raw_key: str = Field(..., min_length=1, max_length=4096)
+    tags: list[str] | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
+class KeyImportRequest(BaseModel):
+    """Request body for importing keys."""
+    keys: list[KeyImportItem] = Field(..., min_length=1, max_length=500)
+
+
+class KeyImportResponse(BaseModel):
+    """Response after importing keys."""
+    task_id: str
+    status: str
+    total: int
+    imported: int
+    skipped: int
